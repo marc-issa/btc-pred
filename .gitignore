@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# Data & DB (large files, regenerated at runtime)
+data/trades.db
+data/bot.log
+data/bot.log.*
+data/live_state.json
+data/btc_5m.csv
+data/BTCUSDT_5m_2017-09-01_to_2025-09-23.csv
+data/BTCUSD_1m_Bitstamp.csv
+
+# Unused model formats (keep .lgb and .pkl for deployment)
+model/*.keras
+model/*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / secrets
+.env
+*.env
