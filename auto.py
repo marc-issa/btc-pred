@@ -114,6 +114,7 @@ chainlink_state = {
     "value": None,
     "buffer": [],
     "lock": threading.Lock(),
+    "last_update": 0,
 }
 
 binance_1m_state = {
@@ -563,6 +564,7 @@ def start_chainlink_stream():
                 ts_ms = data["payload"]["timestamp"]
                 with chainlink_state["lock"]:
                     chainlink_state["value"] = price
+                    chainlink_state["last_update"] = time.time()
                     buf = chainlink_state["buffer"]
                     buf.append((ts_ms, price))
                     if len(buf) > PRICE_BUFFER_SIZE:
@@ -571,7 +573,8 @@ def start_chainlink_stream():
             pass
 
     def on_error(ws, error):
-        pass
+        log.warning(f"Chainlink WS error: {error}")
+        ws.close()
 
     def on_close(ws, code, msg):
         time.sleep(3)
@@ -591,14 +594,26 @@ def start_chainlink_stream():
     t.start()
 
 
+CHAINLINK_STALE_SECONDS = 30
+
 def get_chainlink_price():
     with chainlink_state["lock"]:
+        if chainlink_state["value"] is not None and chainlink_state["last_update"] > 0:
+            age = time.time() - chainlink_state["last_update"]
+            if age > CHAINLINK_STALE_SECONDS:
+                log.warning(f"Chainlink price stale ({age:.0f}s old), returning None")
+                return None
         return chainlink_state["value"]
 
 
 def get_chainlink_price_at(target_ts):
     target_ms = target_ts * 1000
     with chainlink_state["lock"]:
+        if chainlink_state["last_update"] > 0:
+            age = time.time() - chainlink_state["last_update"]
+            if age > CHAINLINK_STALE_SECONDS:
+                log.warning(f"Chainlink price stale ({age:.0f}s old), returning None")
+                return None
         buf = chainlink_state["buffer"]
         if not buf:
             return chainlink_state["value"]
