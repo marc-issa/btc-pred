@@ -290,6 +290,21 @@ def init_db():
         )
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS candles (
+            open_time INTEGER PRIMARY KEY,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            quote_volume REAL,
+            trades_count INTEGER,
+            taker_buy_base REAL,
+            taker_buy_quote REAL
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS alert_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             alert_type TEXT,
@@ -388,6 +403,36 @@ def save_trade_to_db(trade, balance_after):
             trade.get("slippage_cost"),
         ))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def save_candles_to_db(df):
+    """Save 5-min Binance candles to the candles table (skips duplicates)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for idx, row in df.iterrows():
+            open_time = int(idx.timestamp()) if hasattr(idx, 'timestamp') else int(idx)
+            conn.execute("""
+                INSERT OR IGNORE INTO candles
+                (open_time, open, high, low, close, volume, quote_volume,
+                 trades_count, taker_buy_base, taker_buy_quote)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                open_time,
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                float(row["volume"]),
+                float(row.get("quote_volume", 0)),
+                int(row.get("trades", 0)),
+                float(row.get("taker_buy_base", 0)),
+                float(row.get("taker_buy_quote", 0)),
+            ))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"Failed to save candles to DB: {e}")
     finally:
         conn.close()
 
@@ -2019,6 +2064,14 @@ def main():
                                     if trading_halted and not get_config("trading_halted", 0, cast=int):
                                         trading_halted = False
                                         halt_reason = ""
+
+                        # Save latest Binance 5m candles to DB for retraining
+                        try:
+                            candle_df = fetch_binance_klines(limit=5)
+                            if candle_df is not None and len(candle_df) > 0:
+                                save_candles_to_db(candle_df)
+                        except Exception as e:
+                            log.warning(f"Candle save failed: {e}")
 
                         # Refresh calibration every 10 windows
                         cal_refresh_counter += 1

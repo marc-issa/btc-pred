@@ -1,6 +1,6 @@
 import sqlite3
 
-db_path = "C:/Users/user/Desktop/Projects/btc-pred/data/trades.db"
+db_path = "../01-Development/data/trades.db"
 conn = sqlite3.connect(db_path)
 c = conn.cursor()
 
