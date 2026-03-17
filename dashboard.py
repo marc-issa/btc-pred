@@ -860,10 +860,10 @@ function renderValidation(d) {
   const tradeMeta=d.find(m=>m.name==='Total Trades');const tradeCount=tradeMeta?parseInt(tradeMeta.display):0;
   let verdict,vc,vs,vi;
   if(total===0){verdict='Insufficient Data';vc='verdict-na';vi='?';vs='Need more trades.';}
-  else if(tradeCount<200){
-    if(allCorePassed&&score>=70){verdict='Valid \u2014 Confirming';vc='verdict-warn';vi='!';vs=`Core metrics pass. ${200-tradeCount} more trades needed (${tradeCount}/200).`;}
-    else if(allCorePassed&&score>=50){verdict='Promising';vc='verdict-warn';vi='!';vs=`Early signs positive. ${200-tradeCount} more needed (${tradeCount}/200).`;}
-    else if(corePassed>=3){verdict='Marginal';vc='verdict-warn';vi='!';vs=`Some weaknesses. ${200-tradeCount} more needed (${tradeCount}/200).`;}
+  else if(tradeCount<500){
+    if(allCorePassed&&score>=70){verdict='Valid \u2014 Confirming';vc='verdict-warn';vi='!';vs=`Core metrics pass. ${500-tradeCount} more trades needed (${tradeCount}/500).`;}
+    else if(allCorePassed&&score>=50){verdict='Promising';vc='verdict-warn';vi='!';vs=`Early signs positive. ${500-tradeCount} more needed (${tradeCount}/500).`;}
+    else if(corePassed>=3){verdict='Marginal';vc='verdict-warn';vi='!';vs=`Some weaknesses. ${500-tradeCount} more needed (${tradeCount}/500).`;}
     else{verdict='Underperforming';vc='verdict-fail';vi='&#10007;';vs=`Core metrics failing at ${tradeCount} trades.`;}
   } else if(tradeCount<500){
     if(allCorePassed&&score>=70){verdict='Valid Strategy';vc='verdict-pass';vi='&#10003;';vs=`Confirmed at ${tradeCount} trades. Target 500 for full validation.`;}
@@ -1024,7 +1024,7 @@ def api_summary():
 @require_auth
 def api_trades():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 200").fetchall()
+    rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 500").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -1084,14 +1084,14 @@ def api_validation():
     loss_pnls = [t["pnl"] or 0 for t in losses]
 
     # ── 1. Total Trades ──
-    pct_of_200 = min(100, n / 200 * 100)
+    pct_of_500 = min(100, n / 500 * 100)
     metrics.append({
         "name": "Total Trades",
         "display": str(n),
-        "threshold": "Target: >= 200 trades",
-        "detail": f"{200 - n} more needed" if n < 200 else "Sample size sufficient",
-        "status": "pass" if n >= 200 else "warn" if n >= 100 else "fail",
-        "acceptance_pct": pct_of_200,
+        "threshold": "Target: >= 500 trades",
+        "detail": f"{500 - n} more needed" if n < 500 else "Sample size sufficient",
+        "status": "pass" if n >= 500 else "warn" if n >= 200 else "fail",
+        "acceptance_pct": pct_of_500,
     })
 
     # ── 2. Win Rate ──
