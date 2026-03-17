@@ -77,8 +77,25 @@ BATCH_SIZE = 4096
 EPOCHS = 50
 VALIDATION_SPLIT = 0.2
 
+def _resolve_model_paths_safe(model_type: str):
+    """Return (model_path, scaler_path) or (None, None) if version missing/null."""
+    try:
+        version = _active_version(model_type)
+        if version is None:
+            return None, None
+        version_dir = REGISTRY_DIR / model_type / version
+        model_path = version_dir / "model.lgb"
+        scaler_path = version_dir / "feature_cols.pkl"
+        if not model_path.exists() or not scaler_path.exists():
+            return None, None
+        return str(model_path), str(scaler_path)
+    except Exception:
+        return None, None
+
+
 # === Paths ===
 MODEL_PATH, SCALER_PATH = _resolve_model_paths("early_entry")
+LATE_MODEL_PATH, LATE_SCALER_PATH = _resolve_model_paths_safe("late_management")
 DATA_CACHE = str(DATA_DIR / "btc_5m.csv")
 HISTORICAL_CSV = str(DATA_DIR / "BTCUSDT_5m_2017-09-01_to_2025-09-23.csv")
 HISTORICAL_1M_CSV = str(DATA_DIR / "BTCUSD_1m_Bitstamp.csv")

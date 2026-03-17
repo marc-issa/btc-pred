@@ -127,6 +127,8 @@ binance_1m_state = {
 # Prediction feed for live dashboard
 _pred_feed = []
 _pred_feed_lock = threading.Lock()
+_late_pred_feed = []
+_late_pred_feed_lock = threading.Lock()
 
 
 def bg_poll_binance_1m():
@@ -282,6 +284,7 @@ def init_db():
         # Dashboard auth
         "dashboard_username": "",
         "dashboard_password": "",
+        "late_model_enabled": "1",
     }
     now_str = datetime.now().isoformat()
     for k, v in defaults.items():
@@ -329,6 +332,96 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS windows (
+            window_ts         INTEGER PRIMARY KEY,
+            market_slug       TEXT,
+            window_start_ts   INTEGER,
+            window_end_ts     INTEGER,
+            price_to_beat     REAL,
+            final_btc_close   REAL,
+            final_result_side TEXT,
+            resolved          INTEGER DEFAULT 0,
+            bot_traded        INTEGER DEFAULT 0,
+            bot_observed      INTEGER DEFAULT 0,
+            skipped_reason    TEXT,
+            created_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS window_snapshots (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_ts               INTEGER NOT NULL,
+            snapshot_ts             INTEGER NOT NULL,
+            elapsed_s               INTEGER NOT NULL,
+            remaining_s             INTEGER NOT NULL,
+            btc_price               REAL,
+            btc_diff                REAL,
+            price_gap               REAL,
+            price_gap_pct           REAL,
+            high_so_far             REAL,
+            low_so_far              REAL,
+            range_so_far            REAL,
+            body_so_far             REAL,
+            poly_up_price           REAL,
+            poly_down_price         REAL,
+            poly_volume             REAL,
+            poly_liquidity          REAL,
+            market_ratio            REAL,
+            market_side             TEXT,
+            market_conviction       REAL,
+            position_open           INTEGER DEFAULT 0,
+            position_side           TEXT,
+            buy_price               REAL DEFAULT 0,
+            bet_size                REAL DEFAULT 0,
+            current_position_value  REAL DEFAULT 0,
+            unrealized_pnl          REAL DEFAULT 0,
+            early_model_side        TEXT,
+            early_model_prob_up     REAL,
+            early_model_confidence  REAL,
+            early_model_edge        REAL,
+            late_model_signal       TEXT,
+            late_model_prob_up      REAL,
+            late_model_confidence   REAL,
+            late_model_edge         REAL,
+            hold_market_ratio       REAL,
+            hold_conviction         REAL,
+            hold_volume             REAL,
+            hold_liquidity          REAL,
+            stop_loss_triggered     INTEGER DEFAULT 0,
+            flip_candidate          INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_window ON window_snapshots(window_ts)")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_decisions (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_ts               INTEGER NOT NULL,
+            decision_ts             INTEGER NOT NULL,
+            elapsed_s               INTEGER,
+            decision_type           TEXT NOT NULL,
+            decision_source         TEXT,
+            side                    TEXT,
+            executed                INTEGER DEFAULT 0,
+            reason                  TEXT,
+            early_model_prob_up     REAL,
+            early_model_confidence  REAL,
+            early_model_edge        REAL,
+            late_model_signal       TEXT,
+            late_model_prob_up      REAL,
+            late_model_confidence   REAL,
+            late_model_edge         REAL,
+            poly_up_price           REAL,
+            poly_down_price         REAL,
+            btc_price               REAL,
+            unrealized_pnl          REAL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_window ON bot_decisions(window_ts)")
+
     # Add new columns to trades table (idempotent via try/except)
     new_cols = [
         "entry_clob_up REAL", "entry_clob_down REAL",
@@ -347,6 +440,20 @@ def init_db():
         "fill_price REAL",
         "slippage_pct REAL",
         "slippage_cost REAL",
+        # Two-model architecture: decision linkage
+        "entry_decision_id INTEGER",
+        "exit_decision_id INTEGER",
+        "entry_ts INTEGER",
+        "exit_ts INTEGER",
+        "entry_elapsed_s INTEGER",
+        "exit_elapsed_s INTEGER",
+        "entry_early_model_prob_up REAL",
+        "entry_early_model_confidence REAL",
+        "entry_early_model_edge REAL",
+        "exit_late_model_signal TEXT",
+        "exit_late_model_prob_up REAL",
+        "exit_late_model_confidence REAL",
+        "exit_late_model_edge REAL",
     ]
     for col in new_cols:
         try:
@@ -368,8 +475,13 @@ def save_trade_to_db(trade, balance_after):
              exit_reason, exit_market_ratio, exit_volume, exit_liquidity,
              entry_conviction, exit_confidence, exit_edge,
              min_market_ratio, max_market_ratio,
-             intended_price, fill_price, slippage_pct, slippage_cost)
+             intended_price, fill_price, slippage_pct, slippage_cost,
+             entry_decision_id, exit_decision_id,
+             entry_ts, exit_ts, entry_elapsed_s, exit_elapsed_s,
+             entry_early_model_prob_up, entry_early_model_confidence, entry_early_model_edge,
+             exit_late_model_signal, exit_late_model_prob_up, exit_late_model_confidence, exit_late_model_edge)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("window_ts"),
@@ -402,8 +514,230 @@ def save_trade_to_db(trade, balance_after):
             trade.get("fill_price"),
             trade.get("slippage_pct"),
             trade.get("slippage_cost"),
+            trade.get("_entry_decision_id"),
+            trade.get("_exit_decision_id"),
+            trade.get("_entry_ts"),
+            trade.get("_exit_ts"),
+            trade.get("_entry_elapsed_s"),
+            trade.get("_exit_elapsed_s"),
+            trade.get("_entry_early_model_prob_up"),
+            trade.get("_entry_early_model_confidence"),
+            trade.get("_entry_early_model_edge"),
+            trade.get("_exit_late_model_signal"),
+            trade.get("_exit_late_model_prob_up"),
+            trade.get("_exit_late_model_confidence"),
+            trade.get("_exit_late_model_edge"),
         ))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def save_window_start(window_ts, slug, ptb, is_observing=False):
+    """Record a new window row when it starts."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO windows
+            (window_ts, market_slug, window_start_ts, window_end_ts, price_to_beat, bot_observed, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (window_ts, slug, window_ts, window_ts + 300, ptb,
+              1 if is_observing else 0, datetime.utcnow().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def finalize_window(window_ts, final_close, result_side, resolved=False, bot_traded=False, skipped_reason=None):
+    """Update windows row with resolution data at window end."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("""
+            UPDATE windows SET final_btc_close = ?, final_result_side = ?, resolved = ?,
+                               bot_traded = ?, skipped_reason = ?, updated_at = ?
+            WHERE window_ts = ?
+        """, (final_close, result_side, 1 if resolved else 0,
+              1 if bot_traded else 0, skipped_reason,
+              datetime.utcnow().isoformat(), window_ts))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_snapshot_buffer = []
+_snapshot_flush_ts = 0
+SNAPSHOT_FLUSH_INTERVAL = 30  # safety flush every 30s
+
+
+def capture_snapshot(window_ts, market, price_to_beat, current_trade, prediction, chainlink_price):
+    """Append a snapshot tuple to the in-memory buffer. No DB I/O."""
+    now = int(time.time())
+    elapsed = now - window_ts
+    remaining = max(0, (window_ts + 300) - now)
+    price_gap = (chainlink_price - price_to_beat) if (chainlink_price and price_to_beat) else None
+    price_gap_pct = (price_gap / price_to_beat * 100) if (price_gap is not None and price_to_beat) else None
+
+    # BTC diff from price_to_beat
+    btc_diff = (chainlink_price - price_to_beat) if (chainlink_price and price_to_beat) else None
+
+    # Intra-candle high/low/range/body from live state if available
+    high_so_far = current_trade.get("_high_so_far") if current_trade else None
+    low_so_far = current_trade.get("_low_so_far") if current_trade else None
+    range_so_far = (high_so_far - low_so_far) if (high_so_far is not None and low_so_far is not None) else None
+    body_so_far = btc_diff  # body = current - open (price_to_beat is open)
+
+    # Market derived fields
+    poly_up = market.get("up_price")
+    poly_down = market.get("down_price")
+    market_side = "UP" if (poly_up or 0) >= (poly_down or 0) else "DOWN"
+    market_price = poly_up if market_side == "UP" else poly_down
+    market_ratio_val = (market_price / (1 - market_price)) if (market_price and market_price < 1) else None
+    market_conviction_val = abs((poly_up or 0.5) - (poly_down or 0.5))
+
+    # Position state
+    position_open = 1 if (current_trade and current_trade.get("action") not in ("skip",) and not current_trade.get("_observing")) else 0
+    position_side = current_trade.get("action") if position_open else None
+    buy_p = current_trade.get("buy_price", 0) if position_open else 0
+    bet_sz = current_trade.get("bet_size", 0) if position_open else 0
+
+    unrealized = 0
+    cur_pos_value = 0
+    if position_open and buy_p and buy_p > 0:
+        cur_market_price = poly_up if position_side == "UP" else poly_down
+        if cur_market_price:
+            shares = bet_sz / buy_p
+            unrealized = shares * (cur_market_price - buy_p)
+            cur_pos_value = shares * cur_market_price
+
+    # Early model state (current single model maps to early model)
+    early_side = prediction.get("direction") if prediction and "error" not in prediction else None
+    early_prob_up = prediction.get("prob_up") if prediction and "error" not in prediction else None
+    early_conf = prediction.get("confidence") if prediction and "error" not in prediction else None
+    early_edge = current_trade.get("edge_val", 0) if current_trade else None
+
+    # Late model state from current trade
+    late_pred = current_trade.get("_late_prediction") if current_trade else None
+    if late_pred and "error" not in late_pred:
+        late_signal = late_pred.get("signal")
+        late_prob_up = late_pred.get("prob_up")
+        late_conf = late_pred.get("confidence")
+        # Compute late edge vs market
+        if market and late_pred.get("prob_up") is not None:
+            poly_up_val = market.get("up_price", 0.5)
+            poly_down_val = market.get("down_price", 0.5)
+            if late_pred.get("direction") == "UP":
+                late_edge = late_pred["prob_up"] - poly_up_val
+            else:
+                late_edge = (1 - late_pred["prob_up"]) - poly_down_val
+        else:
+            late_edge = None
+    else:
+        late_signal = None
+        late_prob_up = None
+        late_conf = None
+        late_edge = None
+
+    # Guardrail / indicator state
+    hold_mr = current_trade.get("_live_market_ratio") if current_trade else None
+    hold_conv = None
+    hold_vol = current_trade.get("_live_volume") if current_trade else None
+    hold_liq = current_trade.get("_live_liquidity") if current_trade else None
+    stop_triggered = 1 if (current_trade and current_trade.get("_early_exited")) else 0
+    flip_cand = 1 if (current_trade and current_trade.get("_flipped_from")) else 0
+
+    _snapshot_buffer.append((
+        window_ts, now, elapsed, remaining,
+        chainlink_price, btc_diff, price_gap, price_gap_pct,
+        high_so_far, low_so_far, range_so_far, body_so_far,
+        poly_up, poly_down,
+        market.get("volume"), market.get("liquidity"),
+        market_ratio_val, market_side, market_conviction_val,
+        position_open, position_side, buy_p, bet_sz, cur_pos_value, unrealized,
+        early_side, early_prob_up, early_conf, early_edge,
+        late_signal, late_prob_up, late_conf, late_edge,
+        hold_mr, hold_conv, hold_vol, hold_liq, stop_triggered, flip_cand,
+    ))
+
+
+def flush_snapshots():
+    """Batch-write snapshot buffer to DB, then clear it."""
+    global _snapshot_flush_ts
+    if not _snapshot_buffer:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executemany("""
+            INSERT INTO window_snapshots
+            (window_ts, snapshot_ts, elapsed_s, remaining_s,
+             btc_price, btc_diff, price_gap, price_gap_pct,
+             high_so_far, low_so_far, range_so_far, body_so_far,
+             poly_up_price, poly_down_price, poly_volume, poly_liquidity,
+             market_ratio, market_side, market_conviction,
+             position_open, position_side, buy_price, bet_size, current_position_value, unrealized_pnl,
+             early_model_side, early_model_prob_up, early_model_confidence, early_model_edge,
+             late_model_signal, late_model_prob_up, late_model_confidence, late_model_edge,
+             hold_market_ratio, hold_conviction, hold_volume, hold_liquidity,
+             stop_loss_triggered, flip_candidate)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, _snapshot_buffer)
+        conn.commit()
+    finally:
+        conn.close()
+    _snapshot_buffer.clear()
+    _snapshot_flush_ts = int(time.time())
+
+
+def log_decision(window_ts, decision_type, decision_source, side=None, executed=False,
+                 reason=None, prediction=None, market=None, chainlink_price=None,
+                 unrealized_pnl=None, late_prediction=None):
+    """Log a single bot decision to bot_decisions table. Returns decision_id."""
+    now = int(time.time())
+    elapsed = now - window_ts if window_ts else None
+
+    # Early model state
+    early_prob_up = prediction.get("prob_up") if prediction and "error" not in prediction else None
+    early_conf = prediction.get("confidence") if prediction and "error" not in prediction else None
+    early_edge = None
+    if prediction and market and "error" not in prediction:
+        _, early_edge, _ = compute_edge(prediction, market)
+
+    # Late model state
+    late_signal = None
+    late_prob_up = None
+    late_conf = None
+    late_edge = None
+    if late_prediction and "error" not in late_prediction:
+        late_signal = late_prediction.get("signal")
+        late_prob_up = late_prediction.get("prob_up")
+        late_conf = late_prediction.get("confidence")
+        if market:
+            poly_up_val = market.get("up_price", 0.5)
+            poly_down_val = market.get("down_price", 0.5)
+            if late_prediction.get("direction") == "UP":
+                late_edge = late_prediction["prob_up"] - poly_up_val
+            else:
+                late_edge = (1 - late_prediction["prob_up"]) - poly_down_val
+
+    poly_up = market.get("up_price") if market else None
+    poly_down = market.get("down_price") if market else None
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute("""
+            INSERT INTO bot_decisions
+            (window_ts, decision_ts, elapsed_s, decision_type, decision_source,
+             side, executed, reason,
+             early_model_prob_up, early_model_confidence, early_model_edge,
+             late_model_signal, late_model_prob_up, late_model_confidence, late_model_edge,
+             poly_up_price, poly_down_price, btc_price, unrealized_pnl)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (window_ts, now, elapsed, decision_type, decision_source,
+              side, 1 if executed else 0, reason,
+              early_prob_up, early_conf, early_edge,
+              late_signal, late_prob_up, late_conf, late_edge,
+              poly_up, poly_down, chainlink_price, unrealized_pnl))
+        conn.commit()
+        return cursor.lastrowid
     finally:
         conn.close()
 
@@ -691,6 +1025,114 @@ def get_chainlink_intracandle(window_ts):
     }
 
 
+def get_chainlink_intracandle_late(window_ts):
+    """Extract intra-candle features using minutes 0-3 for the late model."""
+    window_ms = window_ts * 1000
+    with chainlink_state["lock"]:
+        buf = chainlink_state["buffer"]
+        if not buf:
+            return None
+        window_prices = [(ts, p) for ts, p in buf if ts >= window_ms]
+
+    if len(window_prices) < 2:
+        return None
+
+    candle_open = window_prices[0][1]
+    minutes = {}
+    for ts_ms, price in window_prices:
+        minute_idx = int((ts_ms - window_ms) / 60000)
+        if minute_idx not in minutes:
+            minutes[minute_idx] = []
+        minutes[minute_idx].append(price)
+
+    if 0 not in minutes:
+        return None
+
+    m0_prices = minutes[0]
+    m0_close = m0_prices[-1]
+    m0_high = max(m0_prices)
+    m0_low = min(m0_prices)
+
+    m1_prices = minutes.get(1, m0_prices)
+    m1_close = m1_prices[-1]
+    m1_high = max(m1_prices)
+    m1_low = min(m1_prices)
+
+    m2_prices = minutes.get(2, m1_prices)
+    m2_close = m2_prices[-1]
+    m2_high = max(m2_prices)
+    m2_low = min(m2_prices)
+
+    m3_prices = minutes.get(3, m2_prices)
+    m3_close = m3_prices[-1]
+    m3_high = max(m3_prices)
+    m3_low = min(m3_prices)
+
+    # Combined aggregates
+    first2_high = max(m0_high, m1_high)
+    first2_low = min(m0_low, m1_low)
+    first3_high = max(first2_high, m2_high)
+    first3_low = min(first2_low, m2_low)
+    first4_high = max(first3_high, m3_high)
+    first4_low = min(first3_low, m3_low)
+
+    # Use Binance 1m volume ratio if available
+    with binance_1m_state["lock"]:
+        vol_ratio = binance_1m_state["vol_ratio"] or 0.0
+
+    co = candle_open + 1e-10  # avoid division by zero
+
+    return {
+        # m0 features
+        "ic_ret_1m": (m0_close - candle_open) / co,
+        "ic_range_1m": (m0_high - m0_low) / co,
+        "ic_body_1m": (m0_close - candle_open) / (m0_high - m0_low + 1e-10),
+        "ic_upper_wick_1m": (m0_high - max(m0_close, candle_open)) / co,
+        "ic_lower_wick_1m": (min(m0_close, candle_open) - m0_low) / co,
+        "ic_vol_1m": 0.0,
+        # m1 cumulative
+        "ic_ret_2m": (m1_close - candle_open) / co,
+        "ic_range_2m": (first2_high - first2_low) / co,
+        "ic_body_2m": (m1_close - candle_open) / (first2_high - first2_low + 1e-10),
+        "ic_vol_2m": 0.0,
+        # m2 cumulative
+        "ic_ret_3m": (m2_close - candle_open) / co,
+        "ic_range_3m": (first3_high - first3_low) / co,
+        "ic_body_3m": (m2_close - candle_open) / (first3_high - first3_low + 1e-10),
+        "ic_vol_3m": 0.0,
+        "ic_upper_wick_3m": (first3_high - max(m2_close, candle_open)) / co,
+        "ic_lower_wick_3m": (min(m2_close, candle_open) - first3_low) / co,
+        # m3 cumulative (new for late model)
+        "ic_ret_4m": (m3_close - candle_open) / co,
+        "ic_range_4m": (first4_high - first4_low) / co,
+        "ic_body_4m": (m3_close - candle_open) / (first4_high - first4_low + 1e-10),
+        "ic_vol_4m": 0.0,
+        "ic_upper_wick_4m": (first4_high - max(m3_close, candle_open)) / co,
+        "ic_lower_wick_4m": (min(m3_close, candle_open) - first4_low) / co,
+        # Momentum
+        "ic_momentum_1to2": (m1_close - m0_close) / co,
+        "ic_momentum_2to3": (m2_close - m1_close) / co,
+        "ic_momentum_3to4": (m3_close - m2_close) / co,
+        # Acceleration
+        "ic_accel": ((m1_close - m0_close) - (m0_close - candle_open)) / co,
+        "ic_accel_late": ((m2_close - m1_close) - (m1_close - m0_close)) / co,
+        "ic_accel_late2": ((m3_close - m2_close) - (m2_close - m1_close)) / co,
+        # Range position
+        "ic_range_pos_2m": (m1_close - first2_low) / (first2_high - first2_low + 1e-10),
+        "ic_range_pos_3m": (m2_close - first3_low) / (first3_high - first3_low + 1e-10),
+        "ic_range_pos_4m": (m3_close - first4_low) / (first4_high - first4_low + 1e-10),
+        # Volume ratios (all 0 since we don't have per-minute Binance vol in real-time)
+        "ic_vol_ratio_1to2": vol_ratio,
+        "ic_vol_ratio_2to3": vol_ratio,
+        "ic_vol_ratio_3to4": vol_ratio,
+        # Reversal
+        "ic_reversal_3m": 1.0 if (np.sign(m1_close - m0_close) != np.sign(m2_close - m1_close)) else 0.0,
+        "ic_reversal_4m": 1.0 if (np.sign(m2_close - m1_close) != np.sign(m3_close - m2_close)) else 0.0,
+        # Reference close
+        "ic_close": m3_close,
+    }
+
+
 # ─── Live Polymarket prices via CLOB API ─────────────────────────────────────
 
 def fetch_clob_prices(token_id_up, token_id_down):
@@ -716,11 +1158,31 @@ def fetch_clob_prices(token_id_up, token_id_down):
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 
-def load_model():
+def load_models():
+    """Load early and late models. Late model failure is non-fatal."""
     model = lgb.Booster(model_file=config.MODEL_PATH)
     with open(config.SCALER_PATH, "rb") as f:
         feature_cols = pickle.load(f)
-    return model, feature_cols
+
+    late_model = None
+    late_feature_cols = None
+    if config.LATE_MODEL_PATH and config.LATE_SCALER_PATH:
+        try:
+            late_model = lgb.Booster(model_file=config.LATE_MODEL_PATH)
+            with open(config.LATE_SCALER_PATH, "rb") as f:
+                late_feature_cols = pickle.load(f)
+            log.info("Late model loaded", extra={"data": {"path": config.LATE_MODEL_PATH}})
+        except Exception as e:
+            log.warning(f"Late model failed to load: {e}")
+            late_model = None
+            late_feature_cols = None
+    else:
+        log.info("No late model configured")
+
+    return {
+        "early": (model, feature_cols),
+        "late": (late_model, late_feature_cols),
+    }
 
 
 def run_prediction(model, feature_cols, price_to_beat, window_ts):
@@ -792,6 +1254,72 @@ def run_prediction(model, feature_cols, price_to_beat, window_ts):
         return {"error": str(e)}
 
 
+def run_late_prediction(late_model, late_feature_cols, price_to_beat, window_ts):
+    """Run prediction using the late management model (minutes 0-3 intra-candle)."""
+    try:
+        df = fetch_binance_klines(limit=750)
+        df_shifted = df.copy()
+        for col in ["open", "high", "low", "close", "volume"]:
+            df_shifted[col] = df[col].shift(1)
+        df_shifted.dropna(inplace=True)
+
+        df_shifted = add_technical_indicators(df_shifted)
+        df_shifted = add_multi_timeframe_features(df_shifted)
+        df_shifted = add_volume_features(df_shifted)
+        df_shifted = add_time_features(df_shifted)
+        df_shifted = add_streak_features(df_shifted)
+        df_shifted = add_lookback_summary_features(df_shifted)
+        df_shifted.dropna(inplace=True)
+
+        if len(df_shifted) == 0:
+            return {"error": "No data after feature build"}
+
+        ic = get_chainlink_intracandle_late(window_ts)
+        row = df_shifted.iloc[[-1]].copy()
+
+        if ic:
+            for key, val in ic.items():
+                if key != "ic_close":
+                    row[key] = val
+            row["price_gap"] = (ic["ic_close"] - price_to_beat) / (row["atr"].values[0] + 1e-10)
+            row["price_gap_pct"] = (ic["ic_close"] - price_to_beat) / (price_to_beat + 1e-10)
+        else:
+            for col in late_feature_cols:
+                if col.startswith("ic_") and col not in row.columns:
+                    row[col] = 0.0
+            row["price_gap"] = 0.0
+            row["price_gap_pct"] = 0.0
+
+        for col in late_feature_cols:
+            if col not in row.columns:
+                row[col] = 0.0
+
+        row[late_feature_cols] = row[late_feature_cols].replace([np.inf, -np.inf], np.nan)
+        row[late_feature_cols] = row[late_feature_cols].fillna(0)
+
+        X = row[late_feature_cols].values
+        prob = late_model.predict(X)[0]
+
+        direction = "UP" if prob > 0.5 else "DOWN"
+        confidence = prob if prob > 0.5 else 1 - prob
+
+        if confidence >= 0.70:
+            signal = "STRONG"
+        elif confidence >= 0.60:
+            signal = "MODERATE"
+        else:
+            signal = "WEAK (skip)"
+
+        return {
+            "direction": direction,
+            "confidence": confidence,
+            "prob_up": prob,
+            "signal": signal,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ─── Trade Tracking ──────────────────────────────────────────────────────────
 
 def compute_edge(prediction, market):
@@ -818,7 +1346,7 @@ def compute_edge(prediction, market):
 
 def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, cal_data=None):
     """
-    Smart entry decision. Returns (side, edge_val, buy_price) or (None, ...).
+    Smart entry decision. Returns (side, edge_val, buy_price, skip_reason) 4-tuple.
 
     Three entry strategies:
     A) Edge-based: model disagrees with market (original logic)
@@ -826,7 +1354,7 @@ def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, 
     C) Market slam (90c+): near-certain outcome, enter early (30s+) for quick profit
     """
     if not prediction or "error" in prediction:
-        return None, 0, 0
+        return None, 0, 0, "no_prediction"
 
     prob_up = prediction["prob_up"]
     confidence = prediction["confidence"]
@@ -859,7 +1387,7 @@ def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, 
         if not model_strongly_disagrees:
             buy_price = market_price
             mkt_edge = confidence - market_price if model_agrees else 0.01
-            return market_side, mkt_edge, buy_price
+            return market_side, mkt_edge, buy_price, None
 
     # ── Strategy B: Market momentum (80c+) — normal entry window ──
     if (market_price >= get_config("poly_momentum_entry", 0.80)
@@ -870,7 +1398,7 @@ def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, 
         if not model_strongly_disagrees:
             buy_price = market_price
             mkt_edge = confidence - market_price if model_agrees else 0.01
-            return market_side, mkt_edge, buy_price
+            return market_side, mkt_edge, buy_price, None
 
     # ── Strategy A: Edge-based (original logic) ──
 
@@ -884,7 +1412,7 @@ def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, 
         price_above = chainlink_price >= price_to_beat
         betting_against = (side == "DOWN" and price_above) or (side == "UP" and not price_above)
         if betting_against and distance_atr > get_config("momentum_atr_threshold", 1.5):
-            return None, edge_val, 0
+            return None, edge_val, 0, "momentum_atr"
 
     # Check momentum: is Chainlink price moving in our direction?
     momentum_aligns = False
@@ -895,23 +1423,23 @@ def should_trade(prediction, market, elapsed_s, chainlink_price, price_to_beat, 
     # Phase 1: early — Only strong setups with momentum
     if elapsed_s < get_config("phase1_max_elapsed", 120):
         if confidence >= get_config("phase1_min_confidence", 0.70) and edge_val > get_config("phase1_min_edge", 0.05) and momentum_aligns:
-            return side, edge_val, buy_price
-        return None, edge_val, 0
+            return side, edge_val, buy_price, None
+        return None, edge_val, 0, "phase1_no_edge"
 
     # Phase 2: mid — Moderate setups OK
     if elapsed_s < get_config("phase2_max_elapsed", 180):
         if confidence >= get_config("phase2_min_confidence", 0.55) and edge_val > get_config("phase2_min_edge", 0.03):
-            return side, edge_val, buy_price
-        return None, edge_val, 0
+            return side, edge_val, buy_price, None
+        return None, edge_val, 0, "phase2_no_edge"
 
     # Phase 3: late — Last chance, need strong conviction
     if elapsed_s <= get_config("entry_before", 240):
         if confidence >= get_config("phase3_min_confidence", 0.70) and edge_val > get_config("phase3_min_edge", 0.05):
-            return side, edge_val, buy_price
-        return None, edge_val, 0
+            return side, edge_val, buy_price, None
+        return None, edge_val, 0, "phase3_no_edge"
 
     # After entry_before — too late
-    return None, edge_val, 0
+    return None, edge_val, 0, "outside_window"
 
 
 def calculate_bet_size(confidence, edge_val, balance, loss_streak=0, cal_data=None):
@@ -1046,6 +1574,51 @@ def calibrate_confidence(raw_conf, cal_data):
     if cal_data is None:
         return raw_conf
     return 0.5 + (raw_conf - 0.5) * cal_data["factor"]
+
+
+# ─── Model Health Monitoring ────────────────────────────────────────────
+
+def compute_model_health(n=50):
+    """Compute early model accuracy from last N predictions with actual outcomes."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("""
+            SELECT p.direction, w.final_result_side
+            FROM predictions p
+            JOIN windows w ON p.window_ts = w.window_ts
+            WHERE w.final_result_side IS NOT NULL AND p.traded = 1
+            ORDER BY p.id DESC LIMIT ?
+        """, (n,)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return {"accuracy": 0.0, "n": 0, "healthy": True}
+    correct = sum(1 for r in rows if r[0] == r[1])
+    total = len(rows)
+    accuracy = correct / total
+    return {"accuracy": accuracy, "n": total, "healthy": accuracy >= 0.48}
+
+
+def compute_late_model_health(n=50):
+    """Compute late model accuracy from decisions with late predictions and outcomes."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("""
+            SELECT d.late_model_prob_up, w.final_result_side
+            FROM bot_decisions d
+            JOIN windows w ON d.window_ts = w.window_ts
+            WHERE d.late_model_prob_up IS NOT NULL AND w.final_result_side IS NOT NULL
+            ORDER BY d.id DESC LIMIT ?
+        """, (n,)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return {"accuracy": 0.0, "n": 0, "healthy": True}
+    correct = sum(1 for r in rows
+                  if (r[0] > 0.5 and r[1] == "UP") or (r[0] <= 0.5 and r[1] == "DOWN"))
+    total = len(rows)
+    accuracy = correct / total
+    return {"accuracy": accuracy, "n": total, "healthy": accuracy >= 0.48}
 
 
 # ─── Sound Notifications ────────────────────────────────────────────────
@@ -1803,8 +2376,37 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
                 "telegram_enabled": bool(cfg_tg),
             },
         }
+
+        # Late model info
+        lp = current_trade.get("_late_prediction") if current_trade else None
+        if lp and "error" not in lp:
+            live_state["late_model"] = {
+                "available": True,
+                "direction": lp.get("direction"),
+                "confidence": round(lp.get("confidence", 0), 4),
+                "prob_up": round(lp.get("prob_up", 0), 4),
+                "signal": lp.get("signal"),
+            }
+        else:
+            live_state["late_model"] = {"available": late_model is not None}
+
+        # Model phase
+        elapsed_secs = 300 - remaining
+        entry_after_cfg = get_config("entry_after", 90)
+        if elapsed_secs < entry_after_cfg:
+            live_state["model_phase"] = "ENTRY PHASE"
+        elif elapsed_secs <= 240:
+            live_state["model_phase"] = "MANAGEMENT PHASE"
+        else:
+            live_state["model_phase"] = "CLOSING"
+
+        # Model health
+        live_state["model_health"] = model_health_cache
+
         with _pred_feed_lock:
             live_state["pred_feed"] = list(_pred_feed)
+        with _late_pred_feed_lock:
+            live_state["late_pred_feed"] = list(_late_pred_feed)
         tmp_path = "data/live_state.json.tmp"
         final_path = "data/live_state.json"
         with open(tmp_path, "w") as f:
@@ -1819,7 +2421,9 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
 def main():
     init_db()
     log.info("Bot starting")
-    model, feature_cols = load_model()
+    models = load_models()
+    model, feature_cols = models["early"]
+    late_model, late_feature_cols = models["late"]
 
     # Load previous trades and balance from DB
     trade_history = load_trades_from_db()
@@ -1831,6 +2435,9 @@ def main():
     # Confidence calibration
     cal_data = compute_calibration()
     cal_refresh_counter = 0
+
+    # Model health cache
+    model_health_cache = {"early": None, "late": None}
 
     # Daily loss tracking
     daily_pnl = get_daily_pnl()
@@ -1886,6 +2493,13 @@ def main():
     bg_pred_running = {"flag": False}
     bg_market_running = {"flag": False}
 
+    # Late model background workers
+    bg_late_prediction = {"value": None}
+    bg_late_running = {"flag": False}
+    late_pred_lock = threading.Lock()
+    last_late_pred_launch = 0
+    late_prediction = None
+
     # CLOB price state
     clob_lock = threading.Lock()
     clob_prices = {"up": None, "down": None}
@@ -1923,6 +2537,34 @@ def main():
         finally:
             with pred_lock:
                 bg_pred_running["flag"] = False
+
+    def bg_run_late_prediction(l_mdl, l_fcols, ptb, wts):
+        try:
+            result = run_late_prediction(l_mdl, l_fcols, ptb, wts)
+            with late_pred_lock:
+                bg_late_prediction["value"] = result
+            # Log to late prediction feed
+            cur_price = get_chainlink_price()
+            if result and "error" not in result:
+                entry = {
+                    "t": int(time.time()),
+                    "dir": result["direction"],
+                    "conf": round(result["confidence"], 4),
+                    "sig": result["signal"],
+                    "ptb": ptb,
+                    "btc": round(cur_price, 2) if cur_price else None,
+                }
+            else:
+                entry = {"t": int(time.time()), "error": result.get("error", "?") if result else "exception"}
+            with _late_pred_feed_lock:
+                _late_pred_feed.append(entry)
+                if len(_late_pred_feed) > 1:
+                    _late_pred_feed.pop(0)
+        except Exception:
+            pass
+        finally:
+            with late_pred_lock:
+                bg_late_running["flag"] = False
 
     def bg_poll_market():
         try:
@@ -1986,6 +2628,9 @@ def main():
                     m = bg_market["value"]
                     if market is None or m["slug"] != last_slug:
                         # ── Window transition ──
+                        # Flush previous window's snapshots
+                        flush_snapshots()
+
                         # 1. Resolve previous trade (only store actual trades, not skips)
                         if current_trade and current_trade.get("price_to_beat"):
                             if current_trade["action"] != "skip" and not current_trade.get("_observing"):
@@ -2080,6 +2725,23 @@ def main():
                                         trading_halted = False
                                         halt_reason = ""
 
+                                    # Finalize traded window
+                                    result_side = current_trade.get("actual")
+                                    finalize_window(current_trade["window_ts"], close_price,
+                                                    result_side, resolved=True, bot_traded=True)
+
+                            else:
+                                # Resolve skipped/observed windows
+                                close_price = get_chainlink_price_at(current_trade["window_ts"] + 300)
+                                poly_result = fetch_polymarket_result(current_trade["window_ts"])
+                                actual = None
+                                if close_price and current_trade.get("price_to_beat"):
+                                    actual = poly_result or ("UP" if close_price >= current_trade["price_to_beat"] else "DOWN")
+                                skip_reason = "observing" if current_trade.get("_observing") else current_trade.get("_skip_reason", "no_edge")
+                                finalize_window(current_trade["window_ts"], close_price, actual,
+                                                resolved=(actual is not None), bot_traded=False,
+                                                skipped_reason=skip_reason)
+
                         # Save latest Binance 5m candles to DB for retraining
                         try:
                             candle_df = fetch_binance_klines(limit=5)
@@ -2088,10 +2750,18 @@ def main():
                         except Exception as e:
                             log.warning(f"Candle save failed: {e}")
 
-                        # Refresh calibration every 10 windows
+                        # Refresh calibration and model health every 10 windows
                         cal_refresh_counter += 1
                         if cal_refresh_counter >= 10:
                             cal_data = compute_calibration()
+                            model_health_cache["early"] = compute_model_health()
+                            model_health_cache["late"] = compute_late_model_health()
+                            if model_health_cache["early"] and not model_health_cache["early"]["healthy"]:
+                                log.warning("Early model unhealthy", extra={"data": model_health_cache["early"]})
+                                send_alert("MODEL_HEALTH", f"Early model accuracy {model_health_cache['early']['accuracy']:.1%} below threshold")
+                            if model_health_cache["late"] and not model_health_cache["late"]["healthy"]:
+                                log.warning("Late model unhealthy", extra={"data": model_health_cache["late"]})
+                                send_alert("MODEL_HEALTH", f"Late model accuracy {model_health_cache['late']['accuracy']:.1%} below threshold")
                             cal_refresh_counter = 0
 
                         # 2. Start new window
@@ -2099,7 +2769,9 @@ def main():
                         event_ts = m["window_ts"]
                         price_to_beat = get_chainlink_price_at(event_ts)
                         prediction = None
+                        late_prediction = None
                         last_pred_launch = 0
+                        last_late_pred_launch = 0
                         position_locked = False
                         prediction_logged = False
 
@@ -2116,11 +2788,15 @@ def main():
                             "sell_price": 0,
                         }
 
+                        # Record window start
+                        save_window_start(event_ts, m["slug"], price_to_beat, is_observing=first_window)
+
                         # First window: always observe only (joined mid-candle)
                         if first_window:
                             current_trade["_observing"] = True
                             position_locked = True
                             first_window = False
+                            log_decision(event_ts, "skip", "risk_rule", executed=True, reason="observing")
 
                         clear_screen()
 
@@ -2137,7 +2813,7 @@ def main():
                 time.sleep(0.5)
                 continue
 
-            # Launch prediction every 1 second
+            # Launch early prediction every 1 second
             if price_to_beat and market and (now - last_pred_launch >= 1):
                 with pred_lock:
                     if not bg_pred_running["flag"]:
@@ -2148,6 +2824,31 @@ def main():
                             args=(model, feature_cols, price_to_beat, market["window_ts"]),
                             daemon=True,
                         ).start()
+
+            # Launch late prediction every 2 seconds (after minute 2)
+            elapsed = now - market["window_ts"] if market else 0
+            if (late_model is not None
+                    and get_config("late_model_enabled", 1, cast=int)
+                    and price_to_beat and market
+                    and elapsed >= 120
+                    and now - last_late_pred_launch >= 2):
+                with late_pred_lock:
+                    if not bg_late_running["flag"]:
+                        bg_late_running["flag"] = True
+                        last_late_pred_launch = now
+                        threading.Thread(
+                            target=bg_run_late_prediction,
+                            args=(late_model, late_feature_cols, price_to_beat, market["window_ts"]),
+                            daemon=True,
+                        ).start()
+
+            # Pick up late prediction results
+            with late_pred_lock:
+                if bg_late_prediction["value"] is not None:
+                    late_prediction = bg_late_prediction["value"]
+                    bg_late_prediction["value"] = None
+                    if current_trade and late_prediction and "error" not in late_prediction:
+                        current_trade["_late_prediction"] = late_prediction
 
             # Pick up prediction updates
             with pred_lock:
@@ -2183,6 +2884,14 @@ def main():
                             halt_reason = ""
                             log.info("Trading resumed from dashboard")
 
+                        # Log halted skip (once per window)
+                        if trading_halted and not position_locked and not current_trade.get("_skip_logged"):
+                            current_trade["_skip_reason"] = f"halted:{halt_reason}"
+                            log_decision(market["window_ts"], "skip", "risk_rule", executed=True,
+                                         reason=f"halted:{halt_reason}", prediction=prediction, market=market,
+                                         chainlink_price=get_chainlink_price())
+                            current_trade["_skip_logged"] = True
+
                         # Try to enter if not locked and not halted
                         # Normal window: 90-240s. Slam trades (90c+): 30s+
                         poly_max = max(market["up_price"], market["down_price"])
@@ -2190,7 +2899,7 @@ def main():
                                     and elapsed_in_window >= get_config("poly_slam_min_elapsed", 30))
                         normal_ok = ENTRY_AFTER <= elapsed_in_window <= ENTRY_BEFORE
                         if not position_locked and not trading_halted and (normal_ok or early_ok):
-                            trade_side, edge_val, buy_price = should_trade(
+                            trade_side, edge_val, buy_price, skip_reason = should_trade(
                                 prediction, market, elapsed_in_window,
                                 get_chainlink_price(), price_to_beat,
                                 cal_data=cal_data,
@@ -2226,6 +2935,27 @@ def main():
                                 current_trade["entry_clob_down"] = market.get("down_price")
                                 position_locked = True
 
+                                # Determine decision source
+                                if early_ok and not normal_ok:
+                                    decision_source = "market_slam"
+                                elif poly_max >= get_config("poly_momentum_entry", 0.80):
+                                    decision_source = "market_momentum"
+                                else:
+                                    decision_source = "early_model"
+                                entry_dec_id = log_decision(market["window_ts"], "enter", decision_source,
+                                             side=trade_side, executed=True,
+                                             reason=f"edge={edge_val:.3f}",
+                                             prediction=prediction, market=market,
+                                             chainlink_price=get_chainlink_price(),
+                                             late_prediction=current_trade.get("_late_prediction"))
+                                current_trade["_entry_decision_id"] = entry_dec_id
+                                current_trade["_entry_ts"] = int(time.time())
+                                current_trade["_entry_elapsed_s"] = elapsed_in_window
+                                current_trade["_entry_early_model_prob_up"] = prediction.get("prob_up")
+                                current_trade["_entry_early_model_confidence"] = prediction.get("confidence")
+                                _, entry_edge_val, _ = compute_edge(prediction, market)
+                                current_trade["_entry_early_model_edge"] = entry_edge_val
+
                                 log.info("Trade entered", extra={"data": {
                                     "side": trade_side, "buy_price": buy_price,
                                     "bet": bet, "edge": edge_val,
@@ -2247,6 +2977,14 @@ def main():
                                         )
                                     except Exception:
                                         pass
+                            else:
+                                # No entry — log skip once per window
+                                current_trade["_skip_reason"] = skip_reason
+                                if not current_trade.get("_skip_logged"):
+                                    log_decision(market["window_ts"], "skip", "early_model", executed=True,
+                                                 reason=skip_reason, prediction=prediction, market=market,
+                                                 chainlink_price=get_chainlink_price())
+                                    current_trade["_skip_logged"] = True
 
             # ── Early exit / position flip checks (each tick while position open) ──
             if (current_trade and current_trade["action"] not in ("skip",)
@@ -2278,6 +3016,29 @@ def main():
                         current_trade["exit_confidence"] = prediction.get("confidence", 0)
                         _, exit_edge, _ = compute_edge(prediction, market)
                         current_trade["exit_edge"] = exit_edge
+                    # Log early exit decision
+                    unrealized_pnl = 0
+                    if current_trade.get("buy_price") and current_trade.get("bet_size"):
+                        shares = current_trade["bet_size"] / current_trade["buy_price"]
+                        unrealized_pnl = shares * (exit_price - current_trade["buy_price"])
+                    exit_dec_id = log_decision(market["window_ts"], "exit", "risk_rule",
+                                 side=current_trade["action"], executed=True,
+                                 reason=exit_reason, prediction=prediction, market=market,
+                                 chainlink_price=get_chainlink_price(), unrealized_pnl=unrealized_pnl,
+                                 late_prediction=current_trade.get("_late_prediction"))
+                    current_trade["_exit_decision_id"] = exit_dec_id
+                    current_trade["_exit_ts"] = int(time.time())
+                    current_trade["_exit_elapsed_s"] = now - market["window_ts"]
+                    lp = current_trade.get("_late_prediction")
+                    if lp and "error" not in lp:
+                        current_trade["_exit_late_model_signal"] = lp.get("signal")
+                        current_trade["_exit_late_model_prob_up"] = lp.get("prob_up")
+                        current_trade["_exit_late_model_confidence"] = lp.get("confidence")
+                        # Compute late edge
+                        if lp.get("direction") == "UP":
+                            current_trade["_exit_late_model_edge"] = lp["prob_up"] - market.get("up_price", 0.5)
+                        else:
+                            current_trade["_exit_late_model_edge"] = (1 - lp["prob_up"]) - market.get("down_price", 0.5)
                     play_early_exit_sound()
 
                 # Position flip check (mutually exclusive with early exit)
@@ -2332,6 +3093,11 @@ def main():
                             "_flipped_from": old_side,
                         }
                         position_locked = True  # No further flips
+                        log_decision(market["window_ts"], "flip", "early_model", side=new_side,
+                                     executed=True, reason=f"flipped_from_{old_side}",
+                                     prediction=prediction, market=market,
+                                     chainlink_price=get_chainlink_price(),
+                                     late_prediction=current_trade.get("_late_prediction"))
                         play_flip_sound()
 
             # Render
@@ -2342,6 +3108,15 @@ def main():
                    trading_halted=trading_halted, halt_reason=halt_reason,
                    daily_pnl=daily_pnl)
 
+            # Capture snapshot every tick
+            if market and current_trade and price_to_beat:
+                capture_snapshot(market["window_ts"], market, price_to_beat,
+                                current_trade, prediction, get_chainlink_price())
+
+            # Periodic safety flush of snapshots
+            if int(time.time()) - _snapshot_flush_ts >= SNAPSHOT_FLUSH_INTERVAL:
+                flush_snapshots()
+
             # Check if window ended
             end_ts = market["window_ts"] + 300
             if now >= end_ts:
@@ -2351,6 +3126,7 @@ def main():
             time.sleep(0.5)
 
     except KeyboardInterrupt:
+        flush_snapshots()
         # Resolve current trade on exit (only if we have a real position)
         if current_trade and current_trade["action"] != "skip" and not current_trade.get("_observing"):
             poly_result = fetch_polymarket_result(current_trade["window_ts"])

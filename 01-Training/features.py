@@ -314,6 +314,157 @@ def add_intracandle_features(df_5m, df_1m):
     return df_5m.join(ic, how="left")
 
 
+def add_intracandle_features_late(df_5m, df_1m):
+    """
+    Add intra-candle features from 1-minute data using minutes 0-3.
+    For each 5-min candle, extracts what happened in the first 4 minutes.
+
+    This simulates the information available when the late management model
+    evaluates at minute 3-4 (180-240s) of the Polymarket 5-min window.
+    Minute 4's close IS the candle close so it cannot be used (leakage).
+    """
+    df_1m = df_1m.copy()
+    df_1m["window"] = df_1m.index.floor("5min")
+    df_1m["minute_in_window"] = ((df_1m.index - df_1m["window"]).dt.total_seconds() / 60).astype(int)
+
+    m0 = df_1m[df_1m["minute_in_window"] == 0].set_index("window")
+    m1 = df_1m[df_1m["minute_in_window"] == 1].set_index("window")
+    m2 = df_1m[df_1m["minute_in_window"] == 2].set_index("window")
+    m3 = df_1m[df_1m["minute_in_window"] == 3].set_index("window")
+
+    common = m0.index.intersection(m1.index).intersection(m2.index).intersection(m3.index).intersection(df_5m.index)
+
+    candle_open = m0.loc[common, "open"]
+
+    m0_close = m0.loc[common, "close"]
+    m0_high = m0.loc[common, "high"]
+    m0_low = m0.loc[common, "low"]
+    m0_vol = m0.loc[common, "volume"]
+
+    m1_close = m1.loc[common, "close"]
+    m1_high = m1.loc[common, "high"]
+    m1_low = m1.loc[common, "low"]
+    m1_vol = m1.loc[common, "volume"]
+
+    m2_close = m2.loc[common, "close"]
+    m2_high = m2.loc[common, "high"]
+    m2_low = m2.loc[common, "low"]
+    m2_vol = m2.loc[common, "volume"]
+
+    m3_close = m3.loc[common, "close"]
+    m3_high = m3.loc[common, "high"]
+    m3_low = m3.loc[common, "low"]
+    m3_vol = m3.loc[common, "volume"]
+
+    # Combined aggregates
+    first2_high = pd.concat([m0_high, m1_high], axis=1).max(axis=1)
+    first2_low = pd.concat([m0_low, m1_low], axis=1).min(axis=1)
+    first2_vol = m0_vol + m1_vol
+
+    first3_high = pd.concat([m0_high, m1_high, m2_high], axis=1).max(axis=1)
+    first3_low = pd.concat([m0_low, m1_low, m2_low], axis=1).min(axis=1)
+    first3_vol = m0_vol + m1_vol + m2_vol
+
+    first4_high = pd.concat([m0_high, m1_high, m2_high, m3_high], axis=1).max(axis=1)
+    first4_low = pd.concat([m0_low, m1_low, m2_low, m3_low], axis=1).min(axis=1)
+    first4_vol = m0_vol + m1_vol + m2_vol + m3_vol
+
+    ic = pd.DataFrame(index=common)
+
+    # ── Minute 1 features (after 60s) ──
+    ic["ic_ret_1m"] = (m0_close - candle_open) / (candle_open + 1e-10)
+    ic["ic_range_1m"] = (m0_high - m0_low) / (candle_open + 1e-10)
+    ic["ic_body_1m"] = (m0_close - candle_open) / (m0_high - m0_low + 1e-10)
+    ic["ic_upper_wick_1m"] = (m0_high - pd.concat([m0_close, candle_open], axis=1).max(axis=1)) / (candle_open + 1e-10)
+    ic["ic_lower_wick_1m"] = (pd.concat([m0_close, candle_open], axis=1).min(axis=1) - m0_low) / (candle_open + 1e-10)
+    ic["ic_vol_1m"] = m0_vol
+
+    # ── Minute 2 features (cumulative first 2 minutes) ──
+    ic["ic_ret_2m"] = (m1_close - candle_open) / (candle_open + 1e-10)
+    ic["ic_range_2m"] = (first2_high - first2_low) / (candle_open + 1e-10)
+    ic["ic_body_2m"] = (m1_close - candle_open) / (first2_high - first2_low + 1e-10)
+    ic["ic_vol_2m"] = first2_vol
+
+    # ── Minute 3 features (cumulative first 3 minutes) ──
+    ic["ic_ret_3m"] = (m2_close - candle_open) / (candle_open + 1e-10)
+    ic["ic_range_3m"] = (first3_high - first3_low) / (candle_open + 1e-10)
+    ic["ic_body_3m"] = (m2_close - candle_open) / (first3_high - first3_low + 1e-10)
+    ic["ic_vol_3m"] = first3_vol
+    ic["ic_upper_wick_3m"] = (first3_high - pd.concat([m2_close, candle_open], axis=1).max(axis=1)) / (candle_open + 1e-10)
+    ic["ic_lower_wick_3m"] = (pd.concat([m2_close, candle_open], axis=1).min(axis=1) - first3_low) / (candle_open + 1e-10)
+
+    # ── Minute 4 features (cumulative first 4 minutes) — NEW for late model ──
+    ic["ic_ret_4m"] = (m3_close - candle_open) / (candle_open + 1e-10)
+    ic["ic_range_4m"] = (first4_high - first4_low) / (candle_open + 1e-10)
+    ic["ic_body_4m"] = (m3_close - candle_open) / (first4_high - first4_low + 1e-10)
+    ic["ic_vol_4m"] = first4_vol
+    ic["ic_upper_wick_4m"] = (first4_high - pd.concat([m3_close, candle_open], axis=1).max(axis=1)) / (candle_open + 1e-10)
+    ic["ic_lower_wick_4m"] = (pd.concat([m3_close, candle_open], axis=1).min(axis=1) - first4_low) / (candle_open + 1e-10)
+
+    # ── Per-minute momentum (all transitions) ──
+    ic["ic_momentum_1to2"] = (m1_close - m0_close) / (candle_open + 1e-10)
+    ic["ic_momentum_2to3"] = (m2_close - m1_close) / (candle_open + 1e-10)
+    ic["ic_momentum_3to4"] = (m3_close - m2_close) / (candle_open + 1e-10)
+
+    # ── Acceleration ──
+    ic["ic_accel"] = ((m1_close - m0_close) - (m0_close - candle_open)) / (candle_open + 1e-10)
+    ic["ic_accel_late"] = ((m2_close - m1_close) - (m1_close - m0_close)) / (candle_open + 1e-10)
+    ic["ic_accel_late2"] = ((m3_close - m2_close) - (m2_close - m1_close)) / (candle_open + 1e-10)
+
+    # ── Range position ──
+    ic["ic_range_pos_2m"] = (m1_close - first2_low) / (first2_high - first2_low + 1e-10)
+    ic["ic_range_pos_3m"] = (m2_close - first3_low) / (first3_high - first3_low + 1e-10)
+    ic["ic_range_pos_4m"] = (m3_close - first4_low) / (first4_high - first4_low + 1e-10)
+
+    # ── Volume trends ──
+    ic["ic_vol_ratio_1to2"] = m1_vol / (m0_vol + 1e-10)
+    ic["ic_vol_ratio_2to3"] = m2_vol / (m1_vol + 1e-10)
+    ic["ic_vol_ratio_3to4"] = m3_vol / (m2_vol + 1e-10)
+
+    # ── Reversal detection ──
+    ic["ic_reversal_3m"] = (np.sign(m1_close - m0_close) != np.sign(m2_close - m1_close)).astype(int)
+    ic["ic_reversal_4m"] = (np.sign(m2_close - m1_close) != np.sign(m3_close - m2_close)).astype(int)
+
+    # Reference close for price_gap (latest available = m3 close at 240s)
+    ic["ic_close"] = m3_close
+
+    return df_5m.join(ic, how="left")
+
+
+def build_features_1m_late(df_5m, df_1m):
+    """
+    Feature pipeline for the late management model.
+    Same as build_features_1m but uses minutes 0-3 intra-candle features
+    instead of minutes 0-2. Same target: does this candle close >= open?
+    """
+    candle_open = df_5m["open"].copy()
+    candle_close = df_5m["close"].copy()
+
+    df_prev = df_5m.copy()
+    df_prev["open"] = df_5m["open"].shift(1)
+    df_prev["high"] = df_5m["high"].shift(1)
+    df_prev["low"] = df_5m["low"].shift(1)
+    df_prev["close"] = df_5m["close"].shift(1)
+    df_prev["volume"] = df_5m["volume"].shift(1)
+    df_prev.dropna(inplace=True)
+
+    df_prev = add_technical_indicators(df_prev)
+    df_prev = add_multi_timeframe_features(df_prev)
+    df_prev = add_volume_features(df_prev)
+    df_prev = add_time_features(df_prev)
+    df_prev = add_streak_features(df_prev)
+    df_prev = add_lookback_summary_features(df_prev)
+
+    df_prev["open"] = candle_open
+    df_prev["close"] = candle_close
+
+    df_prev = add_intracandle_features_late(df_prev, df_1m)
+
+    df_prev = create_target_intracandle(df_prev)
+    df_prev.dropna(inplace=True)
+    return df_prev
+
+
 def build_features_1m(df_5m, df_1m):
     """
     Full feature engineering pipeline using both 5m and 1m data.

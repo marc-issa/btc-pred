@@ -251,9 +251,15 @@ HTML = r"""
       <div id="liveStatus" style="margin-left:auto;font-size:11px;"></div>
     </div>
     <div id="liveView" style="font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px 14px;line-height:1.75;white-space:pre;overflow-x:auto;"></div>
-    <div style="margin-top:auto;padding-top:10px;flex:1;display:flex;flex-direction:column;min-height:0;">
-      <div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-bottom:4px;">Last Prediction</div>
-      <div id="predFeed" style="font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;line-height:1.7;"></div>
+    <div style="margin-top:auto;padding-top:10px;flex:1;display:flex;flex-direction:column;min-height:0;gap:6px;">
+      <div>
+        <div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-bottom:4px;">Early Model</div>
+        <div id="predFeed" style="font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;line-height:1.7;"></div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-bottom:4px;">Late Model</div>
+        <div id="latePredFeed" style="font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;line-height:1.7;"></div>
+      </div>
     </div>
   </div>
 
@@ -278,12 +284,14 @@ HTML = r"""
     <div class="tab" onclick="switchTab('trades',this)">Trades</div>
     <div class="tab" onclick="switchTab('preds',this)">Predictions</div>
     <div class="tab" onclick="switchTab('settings',this)">Settings</div>
+    <div class="tab" onclick="switchTab('decisions',this)">Decisions</div>
     <div class="tab" onclick="switchTab('alerts',this)">Alerts</div>
     <div class="tab" onclick="switchTab('logs',this)">Logs</div>
   </div>
 
   <!-- Tab: Overview (stats, charts, validation) -->
   <div class="tab-content active" id="tab-overview">
+    <div class="stats" id="modelHealthRow" style="margin-bottom:8px;"></div>
     <div class="stats" id="statsRow"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
       <div>
@@ -323,6 +331,8 @@ HTML = r"""
 
   <!-- Tab: Settings -->
   <div class="tab-content" id="tab-settings">
+    <!-- Basic Runtime (always visible) -->
+    <h2 style="margin-top:0;">Basic Runtime</h2>
     <div class="config-grid">
       <div class="config-group">
         <h3>Simulation</h3>
@@ -338,83 +348,99 @@ HTML = r"""
         <h3>Risk Management</h3>
         <div class="config-row"><label>Daily Loss Limit ($)</label><input type="number" id="cfg_daily_loss_limit" step="1"></div>
         <div class="config-row"><label>Balance Stop-Loss ($)</label><input type="number" id="cfg_stop_loss_balance" step="1"></div>
-        <div class="config-row"><label>Drawdown Alert (%)</label><input type="number" id="cfg_drawdown_alert_pct" step="1"></div>
-        <div class="config-row"><label>Stop-Loss % (of stake)</label><input type="number" id="cfg_stop_loss_pct" step="0.05" min="0" max="1"></div>
         <div class="config-row"><label>Consecutive Loss Limit</label><input type="number" id="cfg_consecutive_loss_limit" step="1" min="1"></div>
+        <div class="config-row"><label>Stop-Loss % (of stake)</label><input type="number" id="cfg_stop_loss_pct" step="0.05" min="0" max="1"></div>
+        <div class="config-row"><label>Drawdown Alert (%)</label><input type="number" id="cfg_drawdown_alert_pct" step="1"></div>
         <div id="haltStatus"></div>
       </div>
       <div class="config-group">
-        <h3>Early Exit</h3>
-        <div class="config-row"><label>Profit Threshold (%)</label><input type="number" id="cfg_early_exit_profit_pct" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Window Min (sec)</label><input type="number" id="cfg_early_exit_window_min" step="10"></div>
-        <div class="config-row"><label>Window Max (sec)</label><input type="number" id="cfg_early_exit_window_max" step="10"></div>
-        <div class="config-row"><label>Flip Loss % (of stake)</label><input type="number" id="cfg_flip_loss_pct" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Flip Min Remaining (sec)</label><input type="number" id="cfg_flip_min_remaining" step="10"></div>
-      </div>
-      <div class="config-group">
         <h3>Market Entry</h3>
-        <div class="config-row"><label>Momentum Entry (80c+)</label><input type="number" id="cfg_poly_momentum_entry" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Slam Entry (90c+)</label><input type="number" id="cfg_poly_slam_entry" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Slam Min Elapsed (sec)</label><input type="number" id="cfg_poly_slam_min_elapsed" step="5"></div>
-        <div class="config-row"><label>Max Buy Price</label><input type="number" id="cfg_poly_momentum_max_buy" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Momentum ATR Threshold</label><input type="number" id="cfg_momentum_atr_threshold" step="0.1"></div>
-      </div>
-      <div class="config-group">
-        <h3>Smart Exit</h3>
-        <div class="config-row"><label>Market Agree Hold</label><input type="number" id="cfg_market_agree_hold" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Market Disagree Sell</label><input type="number" id="cfg_market_disagree_sell" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Low Volume Threshold ($)</label><input type="number" id="cfg_low_volume_threshold" step="100"></div>
-        <div class="config-row"><label>High Volume Threshold ($)</label><input type="number" id="cfg_high_volume_threshold" step="100"></div>
-        <div class="config-row"><label>Conviction Hold Threshold</label><input type="number" id="cfg_conviction_hold_threshold" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Calibration Min Trades</label><input type="number" id="cfg_calibration_min_trades" step="5" min="10"></div>
-      </div>
-      <div class="config-group">
-        <h3>Entry Timing</h3>
         <div class="config-row"><label>Entry After (sec)</label><input type="number" id="cfg_entry_after" step="5" min="0"></div>
         <div class="config-row"><label>Entry Before (sec)</label><input type="number" id="cfg_entry_before" step="5" min="0"></div>
-        <div class="config-row"><label>Phase 1 Max Elapsed (sec)</label><input type="number" id="cfg_phase1_max_elapsed" step="5"></div>
-        <div class="config-row"><label>Phase 2 Max Elapsed (sec)</label><input type="number" id="cfg_phase2_max_elapsed" step="5"></div>
+        <div class="config-row"><label>Momentum Entry (80c+)</label><input type="number" id="cfg_poly_momentum_entry" step="0.01" min="0" max="1"></div>
+        <div class="config-row"><label>Slam Entry (90c+)</label><input type="number" id="cfg_poly_slam_entry" step="0.01" min="0" max="1"></div>
+        <div class="config-row"><label>Max Buy Price</label><input type="number" id="cfg_poly_momentum_max_buy" step="0.01" min="0" max="1"></div>
+        <div class="config-row"><label>Market Disagree Sell</label><input type="number" id="cfg_market_disagree_sell" step="0.05" min="0" max="1"></div>
+        <div class="config-row"><label>Low Volume Threshold ($)</label><input type="number" id="cfg_low_volume_threshold" step="100"></div>
       </div>
       <div class="config-group">
-        <h3>Entry Confidence Gates</h3>
-        <div class="config-row"><label>Phase 1 Min Confidence</label><input type="number" id="cfg_phase1_min_confidence" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Phase 1 Min Edge</label><input type="number" id="cfg_phase1_min_edge" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Phase 2 Min Confidence</label><input type="number" id="cfg_phase2_min_confidence" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Phase 2 Min Edge</label><input type="number" id="cfg_phase2_min_edge" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Phase 3 Min Confidence</label><input type="number" id="cfg_phase3_min_confidence" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Phase 3 Min Edge</label><input type="number" id="cfg_phase3_min_edge" step="0.01" min="0" max="1"></div>
-      </div>
-      <div class="config-group">
-        <h3>Market Strategy Gates</h3>
-        <div class="config-row"><label>Slam Min Confidence</label><input type="number" id="cfg_slam_min_confidence" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Slam Strong Disagree</label><input type="number" id="cfg_slam_strong_disagree" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Momentum Strong Disagree</label><input type="number" id="cfg_momentum_strong_disagree" step="0.05" min="0" max="1"></div>
-      </div>
-      <div class="config-group">
-        <h3>Bet Sizing Weights</h3>
-        <div class="config-row"><label>Confidence Weight</label><input type="number" id="cfg_bet_conf_weight" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Edge Weight</label><input type="number" id="cfg_bet_edge_weight" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Confidence Base</label><input type="number" id="cfg_bet_conf_base" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Confidence Range</label><input type="number" id="cfg_bet_conf_range" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Edge Base</label><input type="number" id="cfg_bet_edge_base" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Edge Range</label><input type="number" id="cfg_bet_edge_range" step="0.01" min="0" max="1"></div>
-      </div>
-      <div class="config-group">
-        <h3>Position Flip</h3>
-        <div class="config-row"><label>Flip Min Edge</label><input type="number" id="cfg_flip_min_edge" step="0.01" min="0" max="1"></div>
-        <div class="config-row"><label>Flip Min Confidence</label><input type="number" id="cfg_flip_min_confidence" step="0.05" min="0" max="1"></div>
-      </div>
-      <div class="config-group">
-        <h3>Take Profit Tuning</h3>
-        <div class="config-row"><label>Conviction Bonus</label><input type="number" id="cfg_take_profit_conviction_bonus" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Max Take Profit</label><input type="number" id="cfg_take_profit_max" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Resolution Threshold</label><input type="number" id="cfg_resolution_threshold" step="0.05" min="0" max="1"></div>
+        <h3>Position Management</h3>
+        <div class="config-row"><label>Flip Loss % (of stake)</label><input type="number" id="cfg_flip_loss_pct" step="0.05" min="0" max="1"></div>
+        <div class="config-row"><label>Flip Min Remaining (sec)</label><input type="number" id="cfg_flip_min_remaining" step="10"></div>
+        <div class="config-row"><label>Early Exit Profit %</label><input type="number" id="cfg_early_exit_profit_pct" step="0.05" min="0" max="1"></div>
       </div>
       <div class="config-group">
         <h3>Slippage Simulation</h3>
         <div class="config-row"><label>Enabled</label><select id="cfg_slippage_enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
         <div class="config-row"><label>Random Factor</label><input type="number" id="cfg_slippage_factor" step="0.001"></div>
       </div>
+      <div class="config-group">
+        <h3>Two-Model Architecture</h3>
+        <div class="config-row"><label>Late Model Enabled</label><select id="cfg_late_model_enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
+      </div>
+    </div>
+
+    <!-- Advanced Testing (collapsed) -->
+    <h2 class="collapsible" onclick="toggleAdvanced(this)" style="cursor:pointer;margin-top:16px;">Advanced Testing</h2>
+    <div id="advancedSettings" style="display:none;">
+      <div class="config-grid">
+        <div class="config-group">
+          <h3>Entry Confidence Gates</h3>
+          <div class="config-row"><label>Phase 1 Max Elapsed (sec)</label><input type="number" id="cfg_phase1_max_elapsed" step="5"></div>
+          <div class="config-row"><label>Phase 1 Min Confidence</label><input type="number" id="cfg_phase1_min_confidence" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Phase 1 Min Edge</label><input type="number" id="cfg_phase1_min_edge" step="0.01" min="0" max="1"></div>
+          <div class="config-row"><label>Phase 2 Max Elapsed (sec)</label><input type="number" id="cfg_phase2_max_elapsed" step="5"></div>
+          <div class="config-row"><label>Phase 2 Min Confidence</label><input type="number" id="cfg_phase2_min_confidence" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Phase 2 Min Edge</label><input type="number" id="cfg_phase2_min_edge" step="0.01" min="0" max="1"></div>
+          <div class="config-row"><label>Phase 3 Min Confidence</label><input type="number" id="cfg_phase3_min_confidence" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Phase 3 Min Edge</label><input type="number" id="cfg_phase3_min_edge" step="0.01" min="0" max="1"></div>
+        </div>
+        <div class="config-group">
+          <h3>Market Strategy Gates</h3>
+          <div class="config-row"><label>Slam Min Confidence</label><input type="number" id="cfg_slam_min_confidence" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Slam Strong Disagree</label><input type="number" id="cfg_slam_strong_disagree" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Momentum Strong Disagree</label><input type="number" id="cfg_momentum_strong_disagree" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Slam Min Elapsed (sec)</label><input type="number" id="cfg_poly_slam_min_elapsed" step="5"></div>
+          <div class="config-row"><label>Momentum ATR Threshold</label><input type="number" id="cfg_momentum_atr_threshold" step="0.1"></div>
+        </div>
+        <div class="config-group">
+          <h3>Bet Sizing Weights</h3>
+          <div class="config-row"><label>Confidence Weight</label><input type="number" id="cfg_bet_conf_weight" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Edge Weight</label><input type="number" id="cfg_bet_edge_weight" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Confidence Base</label><input type="number" id="cfg_bet_conf_base" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Confidence Range</label><input type="number" id="cfg_bet_conf_range" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Edge Base</label><input type="number" id="cfg_bet_edge_base" step="0.01" min="0" max="1"></div>
+          <div class="config-row"><label>Edge Range</label><input type="number" id="cfg_bet_edge_range" step="0.01" min="0" max="1"></div>
+        </div>
+        <div class="config-group">
+          <h3>Smart Exit</h3>
+          <div class="config-row"><label>Market Agree Hold</label><input type="number" id="cfg_market_agree_hold" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Conviction Hold Threshold</label><input type="number" id="cfg_conviction_hold_threshold" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>High Volume Threshold ($)</label><input type="number" id="cfg_high_volume_threshold" step="100"></div>
+          <div class="config-row"><label>Exit Window Min (sec)</label><input type="number" id="cfg_early_exit_window_min" step="10"></div>
+          <div class="config-row"><label>Exit Window Max (sec)</label><input type="number" id="cfg_early_exit_window_max" step="10"></div>
+        </div>
+        <div class="config-group">
+          <h3>Take Profit</h3>
+          <div class="config-row"><label>Conviction Bonus</label><input type="number" id="cfg_take_profit_conviction_bonus" step="0.05" min="0" max="1"></div>
+          <div class="config-row"><label>Max Take Profit</label><input type="number" id="cfg_take_profit_max" step="0.05" min="0" max="1"></div>
+        </div>
+        <div class="config-group">
+          <h3>Position Flip</h3>
+          <div class="config-row"><label>Flip Min Edge</label><input type="number" id="cfg_flip_min_edge" step="0.01" min="0" max="1"></div>
+          <div class="config-row"><label>Flip Min Confidence</label><input type="number" id="cfg_flip_min_confidence" step="0.05" min="0" max="1"></div>
+        </div>
+        <div class="config-group">
+          <h3>Calibration</h3>
+          <div class="config-row"><label>Min Trades</label><input type="number" id="cfg_calibration_min_trades" step="5" min="10"></div>
+          <div class="config-row"><label>Resolution Threshold</label><input type="number" id="cfg_resolution_threshold" step="0.05" min="0" max="1"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Integrations (always visible) -->
+    <h2 style="margin-top:16px;">Integrations</h2>
+    <div class="config-grid">
       <div class="config-group">
         <h3>Telegram Alerts</h3>
         <div class="config-row"><label>Bot Token</label><input type="password" id="cfg_telegram_bot_token"></div>
@@ -434,6 +460,11 @@ HTML = r"""
       <button class="btn btn-blue" onclick="saveConfig()">Save Settings</button>
       <div id="configMsg" class="msg"></div>
     </div>
+  </div>
+
+  <!-- Tab: Decisions -->
+  <div class="tab-content" id="tab-decisions">
+    <div style="overflow-x:auto;"><table><thead><tr id="decisionsHead"></tr></thead><tbody id="decisionsBody"></tbody></table></div>
   </div>
 
   <!-- Tab: Alerts -->
@@ -472,6 +503,18 @@ function switchTab(name, el) {
   if (name === 'settings') loadConfig();
   if (name === 'alerts') loadAlerts();
   if (name === 'logs') loadLogs();
+  if (name === 'decisions') loadDecisions();
+}
+
+function toggleAdvanced(el) {
+  const panel = document.getElementById('advancedSettings');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    el.classList.add('open');
+  } else {
+    panel.style.display = 'none';
+    el.classList.remove('open');
+  }
 }
 
 function loadAll() {
@@ -483,6 +526,7 @@ function loadAll() {
   fetch('/api/daily').then(r=>r.json()).then(renderDaily);
   fetch('/api/slippage').then(r=>r.json()).then(renderSlippage);
   fetch('/api/config').then(r=>r.json()).then(renderBotControl);
+  fetch('/api/model_health').then(r=>r.json()).then(renderModelHealth);
   document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
 }
 
@@ -538,7 +582,7 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  const keys=['starting_balance','min_bet','max_bet','max_position_pct','daily_loss_limit','stop_loss_balance','drawdown_alert_pct','stop_loss_pct','consecutive_loss_limit','early_exit_profit_pct','early_exit_window_min','early_exit_window_max','flip_loss_pct','flip_min_remaining','poly_momentum_entry','poly_slam_entry','poly_slam_min_elapsed','poly_momentum_max_buy','momentum_atr_threshold','market_agree_hold','market_disagree_sell','low_volume_threshold','high_volume_threshold','conviction_hold_threshold','calibration_min_trades','entry_after','entry_before','phase1_max_elapsed','phase1_min_confidence','phase1_min_edge','phase2_max_elapsed','phase2_min_confidence','phase2_min_edge','phase3_min_confidence','phase3_min_edge','slam_min_confidence','slam_strong_disagree','momentum_strong_disagree','bet_conf_weight','bet_edge_weight','bet_conf_base','bet_conf_range','bet_edge_base','bet_edge_range','flip_min_edge','flip_min_confidence','take_profit_conviction_bonus','take_profit_max','resolution_threshold','slippage_enabled','slippage_factor','telegram_bot_token','telegram_chat_id','telegram_alerts_enabled','dashboard_username','dashboard_password'];
+  const keys=['starting_balance','min_bet','max_bet','max_position_pct','daily_loss_limit','stop_loss_balance','drawdown_alert_pct','stop_loss_pct','consecutive_loss_limit','early_exit_profit_pct','early_exit_window_min','early_exit_window_max','flip_loss_pct','flip_min_remaining','poly_momentum_entry','poly_slam_entry','poly_slam_min_elapsed','poly_momentum_max_buy','momentum_atr_threshold','market_agree_hold','market_disagree_sell','low_volume_threshold','high_volume_threshold','conviction_hold_threshold','calibration_min_trades','entry_after','entry_before','phase1_max_elapsed','phase1_min_confidence','phase1_min_edge','phase2_max_elapsed','phase2_min_confidence','phase2_min_edge','phase3_min_confidence','phase3_min_edge','slam_min_confidence','slam_strong_disagree','momentum_strong_disagree','bet_conf_weight','bet_edge_weight','bet_conf_base','bet_conf_range','bet_edge_base','bet_edge_range','flip_min_edge','flip_min_confidence','take_profit_conviction_bonus','take_profit_max','resolution_threshold','slippage_enabled','slippage_factor','telegram_bot_token','telegram_chat_id','telegram_alerts_enabled','dashboard_username','dashboard_password','late_model_enabled'];
   const data={};
   keys.forEach(k=>{const el=document.getElementById('cfg_'+k);if(el)data[k]=el.value;});
   fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
@@ -591,6 +635,49 @@ function renderSlippage(d) {
     <div class="stat"><div class="label">Avg Slip</div><div class="value">${d.avg_slippage.toFixed(3)}%</div><div class="sub">${d.count} trades</div></div>
     <div class="stat"><div class="label">Total Cost</div><div class="value ${d.total_cost>0?'red':'dim'}">$${d.total_cost.toFixed(2)}</div><div class="sub">cumulative</div></div>
   `;
+}
+
+function renderModelHealth(d) {
+  const row=document.getElementById('modelHealthRow');
+  if(!d){row.innerHTML='';return;}
+  const mkCard=(label,m,ver)=>{
+    if(!m||!m.n) return `<div class="stat"><div class="label">${label}</div><div class="value dim">--</div><div class="sub">No data</div></div>`;
+    const accPct=(m.accuracy*100).toFixed(1);
+    const cls=m.healthy?'green':'red';
+    const status=m.healthy?'Healthy':'Unhealthy';
+    return `<div class="stat"><div class="label">${label}</div><div class="value ${cls}">${accPct}%</div><div class="sub">${status} (n=${m.n})${ver?' | '+ver:''}</div></div>`;
+  };
+  row.innerHTML=mkCard('Early Model',d.early,d.early_version)+mkCard('Late Model',d.late,d.late_version);
+}
+
+function loadDecisions() {
+  fetch('/api/decisions').then(r=>r.json()).then(renderDecisions);
+}
+
+function renderDecisions(rows) {
+  const head=document.getElementById('decisionsHead');
+  const body=document.getElementById('decisionsBody');
+  if(!rows||!rows.length){head.innerHTML='<th>No decisions yet</th>';body.innerHTML='';return;}
+  const cols=[
+    {k:'decision_ts',l:'Time',fmt:v=>{const d=new Date(v*1000);return d.toLocaleTimeString();}},
+    {k:'elapsed_s',l:'Elapsed',fmt:v=>v!=null?v+'s':'-'},
+    {k:'decision_type',l:'Type'},
+    {k:'decision_source',l:'Source'},
+    {k:'side',l:'Side'},
+    {k:'executed',l:'Exec',fmt:v=>v?'Yes':'No'},
+    {k:'reason',l:'Reason'},
+    {k:'early_model_confidence',l:'Early Conf',fmt:v=>v!=null?(v*100).toFixed(1)+'%':'-'},
+    {k:'late_model_confidence',l:'Late Conf',fmt:v=>v!=null?(v*100).toFixed(1)+'%':'-'},
+  ];
+  head.innerHTML=cols.map(c=>`<th>${c.l}</th>`).join('');
+  body.innerHTML=rows.map(r=>'<tr>'+cols.map(c=>{
+    let v=r[c.k],cls='';
+    if(c.k==='side')cls=v==='UP'?'green':v==='DOWN'?'red':'dim';
+    if(c.k==='decision_type')cls=v==='enter'?'green':v==='exit'?'red':v==='flip'?'yellow':'dim';
+    if(c.k==='executed')cls=v?'green':'dim';
+    let d=v;if(c.fmt&&v!=null)d=c.fmt(v);else if(v==null)d='-';
+    return`<td class="${cls}">${d}</td>`;
+  }).join('')+'</tr>').join('');
 }
 
 function renderLiveConnectionError(message='Connection error') {
@@ -741,6 +828,32 @@ function renderLiveData(d) {
     const sep='='.repeat(75);
     const sep2='-'.repeat(75);
 
+    // Phase indicator
+    let phaseLine='';
+    if(d.model_phase){
+      const phaseColor=d.model_phase==='ENTRY PHASE'?'blue':d.model_phase==='MANAGEMENT PHASE'?'green':'yellow';
+      phaseLine=`${b('Phase:')}             ${c(d.model_phase,phaseColor)}`;
+    }
+
+    // Late model display
+    let lateLine='';
+    if(d.late_model && d.late_model.direction){
+      const lc=d.late_model.direction==='UP'?'green':'red';
+      const lsig=d.late_model.signal||'';
+      const lconf=(d.late_model.confidence*100).toFixed(1);
+      lateLine=`${b('Late Model:')}        ${c(d.late_model.direction+' '+lconf+'% '+lsig,lc)}`;
+    }
+
+    // Decision owner
+    let ownerLine='';
+    if(d.stats && d.stats.trading_halted){
+      ownerLine=`${b('Owner:')}             ${r('Risk Manager')}`;
+    } else if(ps==='open'||ps==='sold'||ps==='flipped'){
+      ownerLine=`${b('Owner:')}             ${dm('Late Model (advisory)')}`;
+    } else {
+      ownerLine=`${b('Owner:')}             ${dm('Early Model')}`;
+    }
+
     v.innerHTML=[
       b('BTC Up/Down 5m - Live Dashboard'),
       dm(d.market_title||''),
@@ -749,21 +862,24 @@ function renderLiveData(d) {
       `${b('BTC Price:')}         ${btcP} (${diffStr})`,
       `${b('BTC Volume:')}        5m: ${vol5m}  |  24h: ${vol24h}`,
       `${b('Time remaining:')}    ${timeStr}  ${bar}`,
+      phaseLine,
       sep2,
       `${b('Prediction:')}        ${predLine}`,
       `${b('Confidence:')}        ${confLine}`,
+      lateLine,
       `${b('Polymarket:')}        ${polyLine}`,
       `${b('Market:')}            ${mktLine}`,
       sep2,
       `${b('Edge:')}              ${edgeLine}`,
       `${b('Position:')}          ${posLine}`,
       holdLine?holdLine:'',
+      ownerLine,
       sep,
       statsLine,
       cfgLine,
     ].filter(l=>l!=='').join('\n');
 
-    // Prediction feed — show only last prediction with details
+    // Early model feed
     const pf=document.getElementById('predFeed');
     if(d.pred_feed && d.pred_feed.length){
       const p=d.pred_feed[d.pred_feed.length-1];
@@ -789,6 +905,30 @@ function renderLiveData(d) {
       }
     } else {
       pf.innerHTML='<span class="dim">Waiting for first prediction...</span>';
+    }
+
+    // Late model feed
+    const lpf=document.getElementById('latePredFeed');
+    if(d.late_pred_feed && d.late_pred_feed.length){
+      const p=d.late_pred_feed[d.late_pred_feed.length-1];
+      const ts=new Date(p.t*1000).toLocaleTimeString();
+      if(p.error){
+        lpf.innerHTML=`<div style="color:var(--red);">ERROR: ${p.error}</div>`;
+      } else {
+        const dc=p.dir==='UP'?'var(--green)':'var(--red)';
+        const sc=p.sig.includes('STRONG')?'var(--green)':p.sig.includes('MODERATE')?'var(--yellow)':'var(--dim)';
+        const diffVal=p.btc&&p.ptb?(p.btc-p.ptb):0;
+        const diffColor=diffVal>=0?'var(--green)':'var(--red)';
+        const diffSign=diffVal>=0?'+':'';
+        lpf.innerHTML=[
+          `<div style="margin-bottom:6px;"><span class="dim">Last run:</span> <b>${ts}</b></div>`,
+          `<div>Prediction: <span style="color:${dc};font-weight:700;">${p.dir}</span> <span style="color:${sc};">${(p.conf*100).toFixed(1)}% ${p.sig}</span></div>`,
+          p.btc?`<div>BTC Price:  <b>$${p.btc.toLocaleString()}</b> <span style="color:${diffColor};">(${diffSign}${diffVal.toFixed(2)})</span></div>`:'',
+        ].filter(l=>l).join('');
+      }
+    } else {
+      const elapsed=d.elapsed||0;
+      lpf.innerHTML=elapsed<120?'<span class="dim">Activates after minute 2...</span>':'<span class="dim">Waiting for late prediction...</span>';
     }
 }
 
@@ -1056,6 +1196,72 @@ def api_predictions():
     rows = conn.execute("SELECT * FROM predictions ORDER BY id DESC LIMIT 50").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/decisions")
+@require_auth
+def api_decisions():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM bot_decisions ORDER BY decision_ts DESC LIMIT 200"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/model_health")
+@require_auth
+def api_model_health():
+    conn = get_db()
+    # Early model health: predictions vs actual outcomes
+    early_rows = conn.execute("""
+        SELECT p.direction, w.final_result_side
+        FROM predictions p
+        JOIN windows w ON p.window_ts = w.window_ts
+        WHERE w.final_result_side IS NOT NULL AND p.traded = 1
+        ORDER BY p.id DESC LIMIT 50
+    """).fetchall()
+    early_correct = sum(1 for r in early_rows if r["direction"] == r["final_result_side"])
+    early_n = len(early_rows)
+    early_acc = early_correct / early_n if early_n else 0
+
+    # Late model health: decisions with late predictions vs outcomes
+    late_rows = conn.execute("""
+        SELECT d.late_model_prob_up, w.final_result_side
+        FROM bot_decisions d
+        JOIN windows w ON d.window_ts = w.window_ts
+        WHERE d.late_model_prob_up IS NOT NULL AND w.final_result_side IS NOT NULL
+        ORDER BY d.id DESC LIMIT 50
+    """).fetchall()
+    late_correct = sum(1 for r in late_rows
+                       if (r["late_model_prob_up"] > 0.5 and r["final_result_side"] == "UP")
+                       or (r["late_model_prob_up"] <= 0.5 and r["final_result_side"] == "DOWN"))
+    late_n = len(late_rows)
+    late_acc = late_correct / late_n if late_n else 0
+
+    # Get active versions
+    try:
+        import json as _json
+        from pathlib import Path
+        pointer = Path("..") / "02-Models" / "model_active.json"
+        if pointer.exists():
+            active = _json.loads(pointer.read_text())
+            early_ver = active.get("early_entry", "?")
+            late_ver = active.get("late_management", "?")
+        else:
+            early_ver = "?"
+            late_ver = "?"
+    except Exception:
+        early_ver = "?"
+        late_ver = "?"
+
+    conn.close()
+    return jsonify({
+        "early": {"accuracy": early_acc, "n": early_n, "healthy": early_acc >= 0.48},
+        "late": {"accuracy": late_acc, "n": late_n, "healthy": late_acc >= 0.48},
+        "early_version": early_ver,
+        "late_version": late_ver,
+    })
 
 
 @app.route("/api/exits")

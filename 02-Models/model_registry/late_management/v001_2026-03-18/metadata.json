@@ -1,0 +1,13 @@
+{
+  "model_type": "late_management",
+  "version": "v001_2026-03-18",
+  "algorithm": "LightGBM",
+  "trained_at": "2026-03-17T23:01:34.164164+00:00",
+  "train_rows": 966300,
+  "features_count": 121,
+  "target": "5m candle direction (close >= open)",
+  "intracandle_minutes": "0-3 (first 240s of 300s window)",
+  "validation_accuracy": 0.872011204211238,
+  "best_iteration": 1297,
+  "notes": "Late management model \u2014 same target as early model but with minute 0-3 intra-candle features."
+}
