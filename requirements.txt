@@ -1,8 +1,0 @@
-numpy
-pandas
-lightgbm
-requests
-websocket-client
-flask
-ta
-scikit-learn

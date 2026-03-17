@@ -9,18 +9,19 @@ build/
 venv/
 .venv/
 
-# Data & DB (large files, regenerated at runtime)
-data/trades.db
-data/bot.log
-data/bot.log.*
-data/live_state.json
-data/btc_5m.csv
-data/BTCUSDT_5m_2017-09-01_to_2025-09-23.csv
-data/BTCUSD_1m_Bitstamp.csv
+# Runtime data & logs
+03-Dashboard/data/trades.db
+03-Dashboard/data/bot.log
+03-Dashboard/data/bot.log.*
+03-Dashboard/data/live_state.json
 
-# Unused model formats (keep .lgb and .pkl for deployment)
-model/*.keras
-model/*.pt
+# Training data caches / large local datasets
+00-Data/BTCUSD_1m_Bitstamp.csv
+00-Data/btc_5m.csv
+
+# Unused model formats (keep .lgb and .pkl for deployment/LFS)
+02-Models/*.keras
+02-Models/*.pt
 
 # IDE
 .vscode/
