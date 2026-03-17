@@ -1,2 +1,4 @@
 model/*.lgb filter=lfs diff=lfs merge=lfs -text
 model/*.pkl filter=lfs diff=lfs merge=lfs -text
+02-Models/model_registry/**/*.lgb filter=lfs diff=lfs merge=lfs -text
+02-Models/model_registry/**/*.pkl filter=lfs diff=lfs merge=lfs -text

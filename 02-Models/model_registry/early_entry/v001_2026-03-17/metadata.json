@@ -1,0 +1,10 @@
+{
+  "model_type": "early_entry",
+  "version": "v001_2026-03-17",
+  "algorithm": "LightGBM",
+  "training_date": "2026-03-17",
+  "target": "5m candle direction (up/down)",
+  "features_file": "feature_cols.pkl",
+  "model_file": "model.lgb",
+  "notes": "Initial versioned snapshot of early_btc_5m_predictor model."
+}

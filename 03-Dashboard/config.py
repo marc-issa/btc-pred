@@ -5,6 +5,7 @@ are stored in the bot_config DB table and editable via the dashboard.
 Static runtime/model/API config remains here.
 """
 
+import json
 from pathlib import Path
 
 
@@ -12,7 +13,28 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 DATA_DIR = PROJECT_DIR / "00-Data"
 MODELS_DIR = PROJECT_DIR / "02-Models"
+REGISTRY_DIR = MODELS_DIR / "model_registry"
 RUNTIME_DATA_DIR = BASE_DIR / "data"
+
+
+def _active_version(model_type: str) -> str | None:
+    """Read model_active.json and return the active version for *model_type*."""
+    pointer_path = MODELS_DIR / "model_active.json"
+    if not pointer_path.exists():
+        return None
+    data = json.loads(pointer_path.read_text())
+    return data.get(model_type)
+
+
+def _resolve_model_paths(model_type: str):
+    """Return (model_path, scaler_path) for the active version of *model_type*."""
+    version = _active_version(model_type)
+    if version is None:
+        raise FileNotFoundError(
+            f"No active version set for '{model_type}' in model_active.json"
+        )
+    version_dir = REGISTRY_DIR / model_type / version
+    return str(version_dir / "model.lgb"), str(version_dir / "feature_cols.pkl")
 
 # === Data Collection ===
 BINANCE_BASE = "https://api.binance.com/api/v3"
@@ -56,8 +78,7 @@ EPOCHS = 50
 VALIDATION_SPLIT = 0.2
 
 # === Paths ===
-MODEL_PATH = str(MODELS_DIR / "early_btc_5m_predictor.lgb")
-SCALER_PATH = str(MODELS_DIR / "early_scaler.pkl")
+MODEL_PATH, SCALER_PATH = _resolve_model_paths("early_entry")
 DATA_CACHE = str(DATA_DIR / "btc_5m.csv")
 HISTORICAL_CSV = str(DATA_DIR / "BTCUSDT_5m_2017-09-01_to_2025-09-23.csv")
 HISTORICAL_1M_CSV = str(DATA_DIR / "BTCUSD_1m_Bitstamp.csv")
