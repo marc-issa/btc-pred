@@ -266,12 +266,6 @@ HTML = r"""
       <h1>Dashboard</h1>
     </div>
     <div class="header-right">
-      <select id="refreshInterval" onchange="setRefresh()">
-        <option value="0">Auto-refresh: Off</option>
-        <option value="10" selected>Every 10s</option>
-        <option value="30">Every 30s</option>
-        <option value="60">Every 60s</option>
-      </select>
       <button onclick="loadAll()">Refresh</button>
       <span class="last-update" id="lastUpdate"></span>
     </div>
@@ -466,7 +460,8 @@ HTML = r"""
 </div><!-- end page-layout -->
 
 <script>
-let refreshTimer = null;
+let liveSource = null;
+let lastLiveWindowTs = null;
 const charts = {};
 
 function switchTab(name, el) {
@@ -477,12 +472,6 @@ function switchTab(name, el) {
   if (name === 'settings') loadConfig();
   if (name === 'alerts') loadAlerts();
   if (name === 'logs') loadLogs();
-}
-
-function setRefresh() {
-  if (refreshTimer) clearInterval(refreshTimer);
-  const sec = parseInt(document.getElementById('refreshInterval').value);
-  if (sec > 0) refreshTimer = setInterval(loadAll, sec * 1000);
 }
 
 function loadAll() {
@@ -604,8 +593,11 @@ function renderSlippage(d) {
   `;
 }
 
-function loadLive() {
-  fetch('/api/live').then(r=>r.json()).then(d=>{
+function renderLiveConnectionError(message='Connection error') {
+  document.getElementById('liveStatus').innerHTML=`<span style="color:var(--red);">&#x25CF;</span> <span class="dim">${message}</span>`;
+}
+
+function renderLiveData(d) {
     const st=document.getElementById('liveStatus');
     const v=document.getElementById('liveView');
     if(d.error){
@@ -613,6 +605,14 @@ function loadLive() {
       v.innerHTML='<span class="dim">Waiting for bot to start...</span>';
       return;
     }
+    const currentWindowTs = d.window_ts || null;
+    const windowCompleted = (
+      lastLiveWindowTs !== null &&
+      currentWindowTs !== null &&
+      currentWindowTs !== lastLiveWindowTs
+    );
+    lastLiveWindowTs = currentWindowTs;
+    if (windowCompleted) loadAll();
     const stale=d.stale;
     const dot=stale?'color:var(--yellow)':'color:var(--green)';
     const label=stale?'Stale (bot may be stopped)':'Connected';
@@ -790,9 +790,30 @@ function loadLive() {
     } else {
       pf.innerHTML='<span class="dim">Waiting for first prediction...</span>';
     }
-  }).catch(()=>{
-    document.getElementById('liveStatus').innerHTML=`<span style="color:var(--red);">&#x25CF;</span> <span class="dim">Connection error</span>`;
-  });
+}
+
+function loadLive() {
+  fetch('/api/live')
+    .then(r=>r.json())
+    .then(renderLiveData)
+    .catch(()=>renderLiveConnectionError());
+}
+
+function connectLiveStream() {
+  if (!window.EventSource) {
+    setInterval(loadLive, 1500);
+    return;
+  }
+  if (liveSource) liveSource.close();
+  liveSource = new EventSource('/stream/live');
+  liveSource.onmessage = (event) => {
+    try {
+      renderLiveData(JSON.parse(event.data));
+    } catch (_) {
+      renderLiveConnectionError('Invalid live update');
+    }
+  };
+  liveSource.onerror = () => renderLiveConnectionError('Live stream reconnecting...');
 }
 
 function renderExits(d) {
@@ -955,10 +976,9 @@ function loadLogs() {
 }
 
 loadAll();
-setRefresh();
-// Live panel always polls (pinned, not a tab)
+// Live panel uses SSE and refreshes full dashboard when a 5m window rolls over
 loadLive();
-setInterval(loadLive, 1500);
+connectLiveStream();
 </script>
 </body>
 </html>
@@ -1496,20 +1516,57 @@ def api_logs():
 
 # ─── Live State API ──────────────────────────────────────────────────────────
 
-@app.route("/api/live")
-@require_auth
-def api_live():
+def _read_live_state():
     path = "data/live_state.json"
     if not os.path.exists(path):
-        return jsonify({"error": "Bot not running"}), 503
+        return {"error": "Bot not running"}, 503
     try:
         with open(path, "r") as f:
             data = json.load(f)
         if _time.time() - data.get("timestamp", 0) > 10:
             data["stale"] = True
-        return jsonify(data)
+        else:
+            data["stale"] = False
+        return data, 200
     except Exception:
-        return jsonify({"error": "Failed to read state"}), 500
+        return {"error": "Failed to read state"}, 500
+
+
+@app.route("/api/live")
+@require_auth
+def api_live():
+    data, status = _read_live_state()
+    return jsonify(data), status
+
+
+@app.route("/stream/live")
+@require_auth
+def stream_live():
+    def event_stream():
+        last_payload = None
+        last_heartbeat = 0
+        yield "retry: 2000\n\n"
+        while True:
+            data, _ = _read_live_state()
+            payload = json.dumps(data)
+            now = _time.time()
+            if payload != last_payload:
+                last_payload = payload
+                yield f"data: {payload}\n\n"
+                last_heartbeat = now
+            elif now - last_heartbeat >= 15:
+                yield ": keep-alive\n\n"
+                last_heartbeat = now
+            _time.sleep(0.5)
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 if __name__ == "__main__":
