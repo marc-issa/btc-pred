@@ -11,18 +11,24 @@ import math
 import os
 import json
 import time as _time
+from pathlib import Path
 from functools import wraps
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string, request, Response
 
 from bot_logging import get_logger
 
-DB_PATH = "data/trades.db"
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_DIR / "data"
+DB_PATH = str(DATA_DIR / "trades.db")
+BOT_LOG_PATH = DATA_DIR / "bot.log"
+LIVE_STATE_PATH = DATA_DIR / "live_state.json"
 STARTING_BALANCE = 100.0
 
 log = get_logger("dashboard")
 
 app = Flask(__name__)
+BOT_PROC = None
 
 
 def _get_dashboard_creds():
@@ -214,13 +220,6 @@ HTML = r"""
   .panel.open { display: block; animation: fadeIn 0.2s; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
-  /* Alert log */
-  .alert-list { max-height: 300px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
-  .alert-item { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 12px; display: flex; gap: 12px; align-items: flex-start; }
-  .alert-item:last-child { border-bottom: none; }
-  .alert-item:hover { background: var(--surface2); }
-  .alert-type { font-weight: 700; min-width: 110px; font-size: 11px; }
-
   /* Log viewer */
   .log-viewer { max-height: 400px; overflow-y: auto; background: #050810; border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 11px; }
   .log-entry { padding: 3px 6px; border-radius: 4px; margin-bottom: 1px; }
@@ -285,7 +284,6 @@ HTML = r"""
     <div class="tab" onclick="switchTab('preds',this)">Predictions</div>
     <div class="tab" onclick="switchTab('settings',this)">Settings</div>
     <div class="tab" onclick="switchTab('decisions',this)">Decisions</div>
-    <div class="tab" onclick="switchTab('alerts',this)">Alerts</div>
     <div class="tab" onclick="switchTab('logs',this)">Logs</div>
   </div>
 
@@ -350,7 +348,6 @@ HTML = r"""
         <div class="config-row"><label>Balance Stop-Loss ($)</label><input type="number" id="cfg_stop_loss_balance" step="1"></div>
         <div class="config-row"><label>Consecutive Loss Limit</label><input type="number" id="cfg_consecutive_loss_limit" step="1" min="1"></div>
         <div class="config-row"><label>Stop-Loss % (of stake)</label><input type="number" id="cfg_stop_loss_pct" step="0.05" min="0" max="1"></div>
-        <div class="config-row"><label>Drawdown Alert (%)</label><input type="number" id="cfg_drawdown_alert_pct" step="1"></div>
         <div id="haltStatus"></div>
       </div>
       <div class="config-group">
@@ -442,14 +439,6 @@ HTML = r"""
     <h2 style="margin-top:16px;">Integrations</h2>
     <div class="config-grid">
       <div class="config-group">
-        <h3>Telegram Alerts</h3>
-        <div class="config-row"><label>Bot Token</label><input type="password" id="cfg_telegram_bot_token"></div>
-        <div class="config-row"><label>Chat ID</label><input type="text" id="cfg_telegram_chat_id"></div>
-        <div class="config-row"><label>Enabled</label><select id="cfg_telegram_alerts_enabled"><option value="1">Yes</option><option value="0">No</option></select></div>
-        <button class="btn btn-sm btn-outline" onclick="testTelegram()">Test Connection</button>
-        <div id="telegramMsg" class="msg"></div>
-      </div>
-      <div class="config-group">
         <h3>Dashboard Auth</h3>
         <div class="config-row"><label>Username</label><input type="text" id="cfg_dashboard_username"></div>
         <div class="config-row"><label>Password</label><input type="password" id="cfg_dashboard_password"></div>
@@ -465,11 +454,6 @@ HTML = r"""
   <!-- Tab: Decisions -->
   <div class="tab-content" id="tab-decisions">
     <div style="overflow-x:auto;"><table><thead><tr id="decisionsHead"></tr></thead><tbody id="decisionsBody"></tbody></table></div>
-  </div>
-
-  <!-- Tab: Alerts -->
-  <div class="tab-content" id="tab-alerts">
-    <div class="alert-list" id="alertList"><div class="dim">No alerts yet</div></div>
   </div>
 
   <!-- Tab: Logs -->
@@ -501,7 +485,6 @@ function switchTab(name, el) {
   el.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
   if (name === 'settings') loadConfig();
-  if (name === 'alerts') loadAlerts();
   if (name === 'logs') loadLogs();
   if (name === 'decisions') loadDecisions();
 }
@@ -582,7 +565,7 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  const keys=['starting_balance','min_bet','max_bet','max_position_pct','daily_loss_limit','stop_loss_balance','drawdown_alert_pct','stop_loss_pct','consecutive_loss_limit','early_exit_profit_pct','early_exit_window_min','early_exit_window_max','flip_loss_pct','flip_min_remaining','poly_momentum_entry','poly_slam_entry','poly_slam_min_elapsed','poly_momentum_max_buy','momentum_atr_threshold','market_agree_hold','market_disagree_sell','low_volume_threshold','high_volume_threshold','conviction_hold_threshold','calibration_min_trades','entry_after','entry_before','phase1_max_elapsed','phase1_min_confidence','phase1_min_edge','phase2_max_elapsed','phase2_min_confidence','phase2_min_edge','phase3_min_confidence','phase3_min_edge','slam_min_confidence','slam_strong_disagree','momentum_strong_disagree','bet_conf_weight','bet_edge_weight','bet_conf_base','bet_conf_range','bet_edge_base','bet_edge_range','flip_min_edge','flip_min_confidence','take_profit_conviction_bonus','take_profit_max','resolution_threshold','slippage_enabled','slippage_factor','telegram_bot_token','telegram_chat_id','telegram_alerts_enabled','dashboard_username','dashboard_password','late_model_enabled'];
+  const keys=['starting_balance','min_bet','max_bet','max_position_pct','daily_loss_limit','stop_loss_balance','stop_loss_pct','consecutive_loss_limit','early_exit_profit_pct','early_exit_window_min','early_exit_window_max','flip_loss_pct','flip_min_remaining','poly_momentum_entry','poly_slam_entry','poly_slam_min_elapsed','poly_momentum_max_buy','momentum_atr_threshold','market_agree_hold','market_disagree_sell','low_volume_threshold','high_volume_threshold','conviction_hold_threshold','calibration_min_trades','entry_after','entry_before','phase1_max_elapsed','phase1_min_confidence','phase1_min_edge','phase2_max_elapsed','phase2_min_confidence','phase2_min_edge','phase3_min_confidence','phase3_min_edge','slam_min_confidence','slam_strong_disagree','momentum_strong_disagree','bet_conf_weight','bet_edge_weight','bet_conf_base','bet_conf_range','bet_edge_base','bet_edge_range','flip_min_edge','flip_min_confidence','take_profit_conviction_bonus','take_profit_max','resolution_threshold','slippage_enabled','slippage_factor','dashboard_username','dashboard_password','late_model_enabled'];
   const data={};
   keys.forEach(k=>{const el=document.getElementById('cfg_'+k);if(el)data[k]=el.value;});
   fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
@@ -591,18 +574,6 @@ function saveConfig() {
       msg.className=d.ok?'msg msg-ok':'msg msg-err';
       msg.textContent=d.ok?'Saved!':'Error: '+d.error;
       setTimeout(()=>msg.textContent='',3000);
-    });
-}
-
-function testTelegram() {
-  const token=document.getElementById('cfg_telegram_bot_token').value;
-  const chatId=document.getElementById('cfg_telegram_chat_id').value;
-  const msg=document.getElementById('telegramMsg');
-  msg.className='msg';msg.textContent='Sending...';
-  fetch('/api/telegram/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,chat_id:chatId})})
-    .then(r=>r.json()).then(d=>{
-      msg.className=d.ok?'msg msg-ok':'msg msg-err';
-      msg.textContent=d.ok?'Test sent!':'Failed: '+(d.error||'Unknown');
     });
 }
 
@@ -687,6 +658,16 @@ function renderLiveConnectionError(message='Connection error') {
 function renderLiveData(d) {
     const st=document.getElementById('liveStatus');
     const v=document.getElementById('liveView');
+    if(d.status==='starting'){
+      st.innerHTML=`<span style="color:var(--yellow);font-size:14px;">&#x25CF;</span> <span class="dim">${d.message||'Bot is starting...'}</span>`;
+      v.innerHTML='<span class="dim">Live feed will appear once the bot finishes startup.</span>';
+      return;
+    }
+    if(d.status==='startup_failed'){
+      st.innerHTML=`<span style="color:var(--red);font-size:14px;">&#x25CF;</span> <span class="dim">${d.message||'Bot startup failed'}</span>`;
+      v.innerHTML='<span class="dim">Check the bot log for the latest error.</span>';
+      return;
+    }
     if(d.error){
       st.innerHTML=`<span style="color:var(--red);">&#x25CF;</span> <span class="dim">${d.error}</span>`;
       v.innerHTML='<span class="dim">Waiting for bot to start...</span>';
@@ -822,8 +803,7 @@ function renderLiveData(d) {
     // Config
     const cfg=d.config;
     const slipStr=cfg.slippage_enabled?g('ON')+` (${cfg.slippage_factor})`:dm('OFF');
-    const tgStr=cfg.telegram_enabled?g('ON'):dm('OFF');
-    const cfgLine=dm('Config:')+` Bet $${cfg.min_bet}-$${cfg.max_bet}  MaxPos ${cfg.max_position_pct}%  DailyLim $${cfg.daily_loss_limit}  StopBal $${cfg.stop_loss_balance}  Slip ${slipStr}  TG ${tgStr}`;
+    const cfgLine=dm('Config:')+` Bet $${cfg.min_bet}-$${cfg.max_bet}  MaxPos ${cfg.max_position_pct}%  DailyLim $${cfg.daily_loss_limit}  StopBal $${cfg.stop_loss_balance}  Slip ${slipStr}`;
 
     const sep='='.repeat(75);
     const sep2='-'.repeat(75);
@@ -1096,17 +1076,6 @@ function renderPreds(rows) {
     let d=c.fmt&&v!=null?c.fmt(v):(v!=null?v:'\u2014');
     return`<td class="${cls}">${d}</td>`;
   }).join('')+'</tr>').join('');
-}
-
-function loadAlerts() {
-  fetch('/api/alerts').then(r=>r.json()).then(d=>{
-    const el=document.getElementById('alertList');
-    if(!d.length){el.innerHTML='<div style="padding:20px;text-align:center;" class="dim">No alerts yet</div>';return;}
-    el.innerHTML=d.map(a=>{
-      const ok=a.sent_ok?'green':'red';const time=a.created_at?a.created_at.split('T')[1]?.substring(0,8)||'':'';
-      return`<div class="alert-item"><span class="dim" style="min-width:60px;">${time}</span><span class="alert-type ${ok}">${a.alert_type}</span><span style="flex:1;">${a.message}</span>${a.error_msg?'<span class="red" style="font-size:11px;">'+a.error_msg+'</span>':''}</div>`;
-    }).join('');
-  });
 }
 
 function loadLogs() {
@@ -1670,31 +1639,7 @@ def api_slippage():
 
 # ─── Telegram Test API ──────────────────────────────────────────────────────
 
-@app.route("/api/telegram/test", methods=["POST"])
-@require_auth
-def api_telegram_test():
-    data = request.get_json()
-    token = data.get("token", "")
-    chat_id = data.get("chat_id", "")
-    if not token or not chat_id:
-        return jsonify(ok=False, error="Token and Chat ID required")
-    from notifications import test_connection
-    ok, err = test_connection(token, chat_id)
-    return jsonify(ok=ok, error=err)
-
-
 # ─── Alert Log API ──────────────────────────────────────────────────────────
-
-@app.route("/api/alerts")
-@require_auth
-def api_alerts():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM alert_log ORDER BY id DESC LIMIT 50"
-    ).fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in rows])
-
 
 # ─── Log Viewer API ─────────────────────────────────────────────────────────
 
@@ -1702,8 +1647,8 @@ def api_alerts():
 @require_auth
 def api_logs():
     level_filter = request.args.get("level", "all")
-    log_file = "data/bot.log"
-    if not os.path.exists(log_file):
+    log_file = BOT_LOG_PATH
+    if not log_file.exists():
         return jsonify([])
 
     levels = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
@@ -1711,7 +1656,7 @@ def api_logs():
 
     entries = []
     try:
-        with open(log_file, "r", encoding="utf-8") as f:
+        with log_file.open("r", encoding="utf-8") as f:
             lines = f.readlines()
         for line in lines[-100:]:
             try:
@@ -1730,13 +1675,21 @@ def api_logs():
 # ─── Live State API ──────────────────────────────────────────────────────────
 
 def _read_live_state():
-    path = "data/live_state.json"
-    if not os.path.exists(path):
+    if not LIVE_STATE_PATH.exists():
+        if BOT_PROC and BOT_PROC.poll() is None:
+            return {"status": "starting", "message": "Bot is starting..."}, 200
+        if BOT_PROC and BOT_PROC.poll() is not None:
+            return {
+                "status": "startup_failed",
+                "message": f"Bot exited during startup (code {BOT_PROC.returncode})",
+            }, 200
         return {"error": "Bot not running"}, 503
     try:
-        with open(path, "r") as f:
+        with LIVE_STATE_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if _time.time() - data.get("timestamp", 0) > 10:
+        if data.get("status") in {"starting", "startup_failed"}:
+            data["stale"] = False
+        elif _time.time() - data.get("timestamp", 0) > 10:
             data["stale"] = True
         else:
             data["stale"] = False
@@ -1787,16 +1740,23 @@ if __name__ == "__main__":
     import sys
 
     # Auto-start auto.py in background
-    bot_proc = None
+    BOT_PROC = None
     auto_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto.py")
     if os.path.exists(auto_py):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with LIVE_STATE_PATH.open("w", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": _time.time(),
+                "status": "starting",
+                "message": "Launching bot process...",
+            }, f)
         print("[*] Starting bot (auto.py) in background...")
-        bot_proc = subprocess.Popen(
+        BOT_PROC = subprocess.Popen(
             [sys.executable, auto_py],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print(f"[*] Bot started (PID: {bot_proc.pid})")
+        print(f"[*] Bot started (PID: {BOT_PROC.pid})")
     else:
         print("[WARN] auto.py not found, bot not started")
 
@@ -1815,7 +1775,7 @@ if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=5050, debug=False)
     finally:
-        if bot_proc:
+        if BOT_PROC:
             print("[*] Stopping bot...")
-            bot_proc.terminate()
-            bot_proc.wait(timeout=5)
+            BOT_PROC.terminate()
+            BOT_PROC.wait(timeout=5)

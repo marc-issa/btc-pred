@@ -10,12 +10,14 @@ Usage:
 import os
 import json
 import logging
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 
 
-LOG_DIR = "data"
-LOG_FILE = os.path.join(LOG_DIR, "bot.log")
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = PROJECT_DIR / "data"
+LOG_FILE = LOG_DIR / "bot.log"
 MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 BACKUP_COUNT = 5
 
@@ -41,7 +43,7 @@ def get_logger(name="bot"):
     """Get or create a JSON rotating file logger.
 
     Args:
-        name: Logger name (e.g., 'auto', 'dashboard', 'notifications')
+        name: Logger name (e.g., 'auto', 'dashboard')
 
     Returns:
         logging.Logger configured with JSON rotating file handler
@@ -54,10 +56,10 @@ def get_logger(name="bot"):
 
     logger.setLevel(logging.DEBUG)
 
-    os.makedirs(LOG_DIR, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     handler = RotatingFileHandler(
-        LOG_FILE,
+        str(LOG_FILE),
         maxBytes=MAX_BYTES,
         backupCount=BACKUP_COUNT,
         encoding="utf-8",

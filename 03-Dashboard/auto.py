@@ -18,12 +18,7 @@ import json
 import sqlite3
 import numpy as np
 from datetime import datetime
-
-# Sound notification (Windows-only)
-try:
-    import winsound
-except ImportError:
-    winsound = None
+from pathlib import Path
 
 # Force UTF-8 output on Windows
 if sys.platform == "win32":
@@ -42,7 +37,6 @@ from data_collector import (
     fetch_polymarket_orderbook,
 )
 from bot_logging import get_logger
-from notifications import send_alert
 from features import (
     add_technical_indicators,
     add_multi_timeframe_features,
@@ -69,7 +63,11 @@ TRADE_HISTORY_SHOW = 7
 STARTING_BALANCE = 100.0
 MIN_BET = 5.0   # Minimum stake per trade (defaults, overridden by DB config)
 MAX_BET = 10.0  # Maximum stake per trade (defaults, overridden by DB config)
-DB_PATH = "data/trades.db"
+PROJECT_DIR = Path(config.PROJECT_DIR)
+DATA_DIR = PROJECT_DIR / "data"
+DB_PATH = str(DATA_DIR / "trades.db")
+LIVE_STATE_PATH = DATA_DIR / "live_state.json"
+LIVE_STATE_TMP_PATH = DATA_DIR / "live_state.json.tmp"
 
 log = get_logger("auto")
 
@@ -131,6 +129,24 @@ _late_pred_feed = []
 _late_pred_feed_lock = threading.Lock()
 
 
+def write_runtime_state(status, message=None, **extra):
+    """Persist lightweight bot status for the dashboard during startup/failure."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": time.time(),
+            "status": status,
+        }
+        if message:
+            payload["message"] = message
+        payload.update(extra)
+        with LIVE_STATE_TMP_PATH.open("w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(LIVE_STATE_TMP_PATH, LIVE_STATE_PATH)
+    except Exception:
+        pass
+
+
 def bg_poll_binance_1m():
     """Background thread: fetch Binance 1m klines every 30s for volume ratio + 24h volume."""
     while True:
@@ -170,7 +186,7 @@ def bg_poll_binance_1m():
 # ─── SQLite Database ─────────────────────────────────────────────────────────
 
 def init_db():
-    os.makedirs("data", exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
@@ -231,10 +247,6 @@ def init_db():
         "max_position_pct": "10",
         "slippage_enabled": "1",
         "slippage_factor": "0.005",
-        "telegram_bot_token": "",
-        "telegram_chat_id": "",
-        "telegram_alerts_enabled": "0",
-        "drawdown_alert_pct": "15",
         "early_exit_profit_pct": "0.50",
         "early_exit_window_min": "60",
         "early_exit_window_max": "270",
@@ -308,17 +320,6 @@ def init_db():
             trades_count INTEGER,
             taker_buy_base REAL,
             taker_buy_quote REAL
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS alert_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            alert_type TEXT,
-            message TEXT,
-            sent_ok INTEGER,
-            error_msg TEXT,
-            created_at TEXT
         )
     """)
 
@@ -1642,39 +1643,6 @@ def compute_late_model_health(n=50):
 
 # ─── Sound Notifications ────────────────────────────────────────────────
 
-def play_entry_sound(direction):
-    """Play beep on position entry. UP = high pitch, DOWN = low pitch."""
-    if winsound is None:
-        return
-    try:
-        freq = 800 if direction == "UP" else 400
-        winsound.Beep(freq, 200)
-    except Exception:
-        pass
-
-
-def play_early_exit_sound():
-    """Play double beep on early exit."""
-    if winsound is None:
-        return
-    try:
-        winsound.Beep(600, 150)
-        winsound.Beep(800, 150)
-    except Exception:
-        pass
-
-
-def play_flip_sound():
-    """Play 3 short beeps on position flip."""
-    if winsound is None:
-        return
-    try:
-        for _ in range(3):
-            winsound.Beep(500, 100)
-    except Exception:
-        pass
-
-
 # ─── Smart Exit: Market Agreement + Volume + Conviction ─────────────────
 
 def compute_conviction(confidence, edge_val):
@@ -2241,17 +2209,14 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
     cfg_stop = get_config("stop_loss_balance", 40)
     cfg_slip = get_config("slippage_enabled", 1, cast=int)
     cfg_slip_f = get_config("slippage_factor", 0.005)
-    cfg_tg = get_config("telegram_alerts_enabled", 0, cast=int)
     slip_str = f"{GREEN}ON{RESET} ({cfg_slip_f:.3f})" if cfg_slip else f"{DIM}OFF{RESET}"
-    tg_str = f"{GREEN}ON{RESET}" if cfg_tg else f"{DIM}OFF{RESET}"
     config_line = (
         f"  {DIM}Config:{RESET} "
         f"Bet ${cfg_min:.0f}-${cfg_max:.0f}  "
         f"MaxPos {cfg_pos:.0f}%  "
         f"DailyLim ${cfg_daily:.0f}  "
         f"StopBal ${cfg_stop:.0f}  "
-        f"Slip {slip_str}  "
-        f"TG {tg_str}"
+        f"Slip {slip_str}"
     )
 
     # Build output
@@ -2361,6 +2326,7 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
 
         live_state = {
             "timestamp": now,
+            "status": "running",
             "market_title": market.get("title", ""),
             "window_ts": event_ts,
             "price_to_beat": price_to_beat,
@@ -2392,7 +2358,6 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
                 "max_position_pct": cfg_pos, "daily_loss_limit": cfg_daily,
                 "stop_loss_balance": cfg_stop,
                 "slippage_enabled": bool(cfg_slip), "slippage_factor": cfg_slip_f,
-                "telegram_enabled": bool(cfg_tg),
             },
         }
 
@@ -2426,11 +2391,9 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
             live_state["pred_feed"] = list(_pred_feed)
         with _late_pred_feed_lock:
             live_state["late_pred_feed"] = list(_late_pred_feed)
-        tmp_path = "data/live_state.json.tmp"
-        final_path = "data/live_state.json"
-        with open(tmp_path, "w") as f:
+        with LIVE_STATE_TMP_PATH.open("w", encoding="utf-8") as f:
             json.dump(live_state, f)
-        os.replace(tmp_path, final_path)
+        os.replace(LIVE_STATE_TMP_PATH, LIVE_STATE_PATH)
     except Exception:
         pass
 
@@ -2440,6 +2403,7 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
 def main():
     init_db()
     log.info("Bot starting")
+    write_runtime_state("starting", "Loading models...")
     models = load_models()
     model, feature_cols = models["early"]
     late_model, late_feature_cols = models["late"]
@@ -2485,13 +2449,9 @@ def main():
     threading.Thread(target=bg_poll_binance_1m, daemon=True).start()
 
     print("Connecting to Chainlink BTC/USD stream...")
-    for _ in range(20):
-        if get_chainlink_price() is not None:
-            break
+    write_runtime_state("starting", "Connecting to Chainlink BTC/USD stream...")
+    while get_chainlink_price() is None:
         time.sleep(0.5)
-    else:
-        print("[ERROR] Could not connect to Chainlink price stream")
-        sys.exit(1)
 
     clear_screen()
 
@@ -2683,11 +2643,6 @@ def main():
                                         "won": won_val, "balance": balance,
                                     }})
 
-                                    # Send trade exit alert
-                                    result_str = f"Won +${pnl_val:.2f}" if won_val else f"Lost -${abs(pnl_val):.2f}"
-                                    exit_r = current_trade.get("exit_reason", "held")
-                                    send_alert("TRADE_EXIT", f"{result_str} on {side_val} ({exit_r}). Balance: ${balance:.2f}")
-
                                     # Update daily stats
                                     update_daily_stats(pnl_val, won_val)
 
@@ -2704,7 +2659,6 @@ def main():
                                         trading_halted = True
                                         halt_reason = "daily_loss"
                                         log.warning("Daily loss limit hit", extra={"data": {"daily_pnl": daily_pnl}})
-                                        send_alert("DAILY_LOSS_LIMIT", f"Daily loss ${daily_pnl:+.2f} hit limit -${daily_limit}. Trading halted.")
                                         try:
                                             conn = sqlite3.connect(DB_PATH)
                                             conn.execute("INSERT OR REPLACE INTO bot_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -2722,7 +2676,6 @@ def main():
                                         trading_halted = True
                                         halt_reason = "balance_stop_loss"
                                         log.warning("Balance stop-loss hit", extra={"data": {"balance": balance}})
-                                        send_alert("BALANCE_STOP_LOSS", f"Balance ${balance:.2f} <= stop-loss ${stop_loss_bal:.2f}. Trading halted.")
                                         try:
                                             conn = sqlite3.connect(DB_PATH)
                                             conn.execute("INSERT OR REPLACE INTO bot_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -2733,13 +2686,6 @@ def main():
                                             conn.close()
                                         except Exception:
                                             pass
-
-                                    # Check drawdown alert
-                                    starting = get_config("starting_balance", STARTING_BALANCE)
-                                    drawdown_pct = (starting - balance) / starting * 100 if starting > 0 else 0
-                                    alert_pct = get_config("drawdown_alert_pct", 15)
-                                    if drawdown_pct >= alert_pct:
-                                        send_alert("DRAWDOWN", f"Drawdown at {drawdown_pct:.1f}%, exceeds {alert_pct:.0f}% threshold. Balance: ${balance:.2f}")
 
                                     # Update consecutive loss counter
                                     if current_trade.get("won") is False:
@@ -2785,10 +2731,8 @@ def main():
                             model_health_cache["late"] = compute_late_model_health()
                             if model_health_cache["early"] and not model_health_cache["early"]["healthy"]:
                                 log.warning("Early model unhealthy", extra={"data": model_health_cache["early"]})
-                                send_alert("MODEL_HEALTH", f"Early model accuracy {model_health_cache['early']['accuracy']:.1%} below threshold")
                             if model_health_cache["late"] and not model_health_cache["late"]["healthy"]:
                                 log.warning("Late model unhealthy", extra={"data": model_health_cache["late"]})
-                                send_alert("MODEL_HEALTH", f"Late model accuracy {model_health_cache['late']['accuracy']:.1%} below threshold")
                             cal_refresh_counter = 0
 
                         # 2. Start new window
@@ -2989,12 +2933,6 @@ def main():
                                     "bet": bet, "edge": edge_val,
                                     "slippage_pct": slip_pct,
                                 }})
-                                send_alert("TRADE_ENTRY",
-                                    f"Bought {trade_side} at {buy_price*100:.1f}c, stake ${bet:.2f}"
-                                    + (f" (slip: {slip_pct:.2f}%)" if slip_pct > 0 else ""))
-
-                                # Sound notification
-                                play_entry_sound(trade_side)
 
                                 # Update prediction log as traded
                                 if prediction_logged:
@@ -3068,7 +3006,6 @@ def main():
                             current_trade["_exit_late_model_edge"] = lp["prob_up"] - market.get("up_price", 0.5)
                         else:
                             current_trade["_exit_late_model_edge"] = (1 - lp["prob_up"]) - market.get("down_price", 0.5)
-                    play_early_exit_sound()
 
                 # Position flip check (mutually exclusive with early exit)
                 elif prediction and "error" not in prediction:
@@ -3127,7 +3064,6 @@ def main():
                                      prediction=prediction, market=market,
                                      chainlink_price=get_chainlink_price(),
                                      late_prediction=current_trade.get("_late_prediction"))
-                        play_flip_sound()
 
             # Render
             move_cursor_top()
@@ -3185,4 +3121,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        log.exception("Bot crashed")
+        write_runtime_state("startup_failed", str(exc))
+        raise
