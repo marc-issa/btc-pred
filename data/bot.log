@@ -1,0 +1,4 @@
+{"timestamp": "2026-03-17T23:43:27.072478+00:00", "level": "INFO", "event": "Bot starting"}
+{"timestamp": "2026-03-17T23:43:27.132492+00:00", "level": "INFO", "event": "Late model loaded", "data": {"path": "C:\\Users\\user\\Desktop\\Projects\\btc-pred\\01-Development\\02-Models\\model_registry\\late_management\\v002_2026-03-18\\model.lgb"}}
+{"timestamp": "2026-03-17T23:43:41.410869+00:00", "level": "INFO", "event": "Bot starting"}
+{"timestamp": "2026-03-17T23:43:41.466381+00:00", "level": "INFO", "event": "Late model loaded", "data": {"path": "C:\\Users\\user\\Desktop\\Projects\\btc-pred\\01-Development\\02-Models\\model_registry\\late_management\\v002_2026-03-18\\model.lgb"}}

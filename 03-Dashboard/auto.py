@@ -207,6 +207,9 @@ def init_db():
             chainlink_price REAL,
             ptb REAL,
             traded INTEGER,
+            model_type TEXT DEFAULT 'early',
+            trade_action TEXT,
+            actual TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -460,6 +463,14 @@ def init_db():
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+    # Add new columns to predictions table (for existing DBs)
+    pred_new_cols = ["model_type TEXT DEFAULT 'early'", "trade_action TEXT", "actual TEXT"]
+    for col in pred_new_cols:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.commit()
     conn.close()
 
@@ -559,6 +570,12 @@ def finalize_window(window_ts, final_close, result_side, resolved=False, bot_tra
         """, (final_close, result_side, 1 if resolved else 0,
               1 if bot_traded else 0, skipped_reason,
               datetime.utcnow().isoformat(), window_ts))
+        # Backfill actual market result on all predictions for this window
+        if result_side:
+            conn.execute(
+                "UPDATE predictions SET actual = ? WHERE window_ts = ? AND actual IS NULL",
+                (result_side, window_ts),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -772,14 +789,14 @@ def save_candles_to_db(df):
         conn.close()
 
 
-def save_prediction_to_db(prediction, market, chainlink_price, price_to_beat, elapsed_s, traded):
+def save_prediction_to_db(prediction, market, chainlink_price, price_to_beat, elapsed_s, traded, model_type="early", trade_action=None):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
             INSERT INTO predictions
             (window_ts, elapsed_s, direction, confidence, prob_up, edge_val,
-             poly_up, poly_down, chainlink_price, ptb, traded)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             poly_up, poly_down, chainlink_price, ptb, traded, model_type, trade_action)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             market["window_ts"],
             elapsed_s,
@@ -792,6 +809,8 @@ def save_prediction_to_db(prediction, market, chainlink_price, price_to_beat, el
             chainlink_price,
             price_to_beat,
             1 if traded else 0,
+            model_type,
+            trade_action,
         ))
         conn.commit()
     finally:
@@ -1935,7 +1954,7 @@ def fmt_time(ts):
 
 def render(market, price_to_beat, prediction, chainlink_now, trade_history, current_trade, balance,
            cal_data=None, consecutive_losses=0, trading_halted=False, halt_reason="",
-           daily_pnl=0.0):
+           daily_pnl=0.0, late_model_available=False, model_health=None):
     now = int(time.time())
     event_ts = market["window_ts"]
     end_ts = event_ts + 300
@@ -2388,7 +2407,7 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
                 "signal": lp.get("signal"),
             }
         else:
-            live_state["late_model"] = {"available": late_model is not None}
+            live_state["late_model"] = {"available": late_model_available}
 
         # Model phase
         elapsed_secs = 300 - remaining
@@ -2401,7 +2420,7 @@ def render(market, price_to_beat, prediction, chainlink_now, trade_history, curr
             live_state["model_phase"] = "CLOSING"
 
         # Model health
-        live_state["model_health"] = model_health_cache
+        live_state["model_health"] = model_health or {"early": None, "late": None}
 
         with _pred_feed_lock:
             live_state["pred_feed"] = list(_pred_feed)
@@ -2538,7 +2557,7 @@ def main():
             with pred_lock:
                 bg_pred_running["flag"] = False
 
-    def bg_run_late_prediction(l_mdl, l_fcols, ptb, wts):
+    def bg_run_late_prediction(l_mdl, l_fcols, ptb, wts, mkt, elapsed_s, t_action):
         try:
             result = run_late_prediction(l_mdl, l_fcols, ptb, wts)
             with late_pred_lock:
@@ -2554,6 +2573,14 @@ def main():
                     "ptb": ptb,
                     "btc": round(cur_price, 2) if cur_price else None,
                 }
+                # Save late prediction to DB
+                try:
+                    save_prediction_to_db(
+                        result, mkt, cur_price, ptb, elapsed_s, False, model_type="late",
+                        trade_action=t_action,
+                    )
+                except Exception:
+                    pass
             else:
                 entry = {"t": int(time.time()), "error": result.get("error", "?") if result else "exception"}
             with _late_pred_feed_lock:
@@ -2838,7 +2865,7 @@ def main():
                         last_late_pred_launch = now
                         threading.Thread(
                             target=bg_run_late_prediction,
-                            args=(late_model, late_feature_cols, price_to_beat, market["window_ts"]),
+                            args=(late_model, late_feature_cols, price_to_beat, market["window_ts"], market, int(elapsed), current_trade.get("action", "skip") if current_trade else "skip"),
                             daemon=True,
                         ).start()
 
@@ -2873,6 +2900,7 @@ def main():
                                 save_prediction_to_db(
                                     prediction, market, get_chainlink_price(),
                                     price_to_beat, elapsed_in_window, traded,
+                                    trade_action=current_trade.get("action", "skip"),
                                 )
                             except Exception:
                                 pass
@@ -2974,6 +3002,7 @@ def main():
                                         save_prediction_to_db(
                                             prediction, market, get_chainlink_price(),
                                             price_to_beat, elapsed_in_window, True,
+                                            trade_action=trade_side,
                                         )
                                     except Exception:
                                         pass
@@ -3106,7 +3135,9 @@ def main():
                    trade_history, current_trade, balance,
                    cal_data=cal_data, consecutive_losses=consecutive_losses,
                    trading_halted=trading_halted, halt_reason=halt_reason,
-                   daily_pnl=daily_pnl)
+                   daily_pnl=daily_pnl,
+                   late_model_available=late_model is not None,
+                   model_health=model_health_cache)
 
             # Capture snapshot every tick
             if market and current_trade and price_to_beat:

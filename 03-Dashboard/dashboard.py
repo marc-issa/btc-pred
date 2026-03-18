@@ -1075,17 +1075,23 @@ function renderTrades(rows) {
 function renderPreds(rows) {
   if(!rows.length){document.getElementById('predsHead').innerHTML='<th>No predictions yet</th>';document.getElementById('predsBody').innerHTML='';return;}
   const cols=[
-    {k:'created_at',l:'Time',fmt:v=>v?(v.split(' ')[1]||v):''},{k:'elapsed_s',l:'Elapsed'},
+    {k:'created_at',l:'Time',fmt:v=>v?(v.split(' ')[1]||v):''},{k:'model_type',l:'Model',fmt:v=>v==='late'?'Late':'Early'},
+    {k:'elapsed_s',l:'Elapsed'},
     {k:'direction',l:'Dir'},{k:'confidence',l:'Conf',fmt:v=>(v*100).toFixed(1)+'%'},
     {k:'prob_up',l:'P(Up)',fmt:v=>(v*100).toFixed(1)+'%'},{k:'edge_val',l:'Edge',fmt:v=>(v*100).toFixed(1)+'%'},
     {k:'poly_up',l:'Poly Up',fmt:v=>(v*100).toFixed(1)+'c'},{k:'poly_down',l:'Poly Dn',fmt:v=>(v*100).toFixed(1)+'c'},
     {k:'chainlink_price',l:'BTC',fmt:v=>'$'+Number(v).toLocaleString()},
+    {k:'trade_action',l:'Action',fmt:v=>v||'\u2014'},
+    {k:'actual',l:'Result',fmt:v=>v||'\u2014'},
     {k:'traded',l:'Traded',fmt:v=>v?'Yes':'No'},
   ];
   document.getElementById('predsHead').innerHTML=cols.map(c=>`<th>${c.l}</th>`).join('');
   document.getElementById('predsBody').innerHTML=rows.slice(0,50).map(r=>'<tr>'+cols.map(c=>{
     let v=r[c.k],cls='';
     if(c.k==='direction')cls=v==='UP'?'green':'red';
+    if(c.k==='model_type')cls=v==='late'?'yellow':'cyan';
+    if(c.k==='trade_action')cls=v==='UP'?'green':v==='DOWN'?'red':'dim';
+    if(c.k==='actual')cls=v==='UP'?'green':v==='DOWN'?'red':'dim';
     if(c.k==='traded')cls=v?'green':'dim';
     let d=c.fmt&&v!=null?c.fmt(v):(v!=null?v:'\u2014');
     return`<td class="${cls}">${d}</td>`;
@@ -1193,7 +1199,7 @@ def api_trades():
 @require_auth
 def api_predictions():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM predictions ORDER BY id DESC LIMIT 50").fetchall()
+    rows = conn.execute("SELECT * FROM predictions ORDER BY id DESC LIMIT 100").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -1219,6 +1225,7 @@ def api_model_health():
         FROM predictions p
         JOIN windows w ON p.window_ts = w.window_ts
         WHERE w.final_result_side IS NOT NULL AND p.traded = 1
+              AND (p.model_type = 'early' OR p.model_type IS NULL)
         ORDER BY p.id DESC LIMIT 50
     """).fetchall()
     early_correct = sum(1 for r in early_rows if r["direction"] == r["final_result_side"])
@@ -1293,7 +1300,7 @@ def api_validation():
         "SELECT * FROM trades WHERE action != 'skip' AND won IS NOT NULL ORDER BY id"
     ).fetchall()
     preds = conn.execute(
-        "SELECT * FROM predictions WHERE traded = 1 ORDER BY id"
+        "SELECT * FROM predictions WHERE traded = 1 AND (model_type = 'early' OR model_type IS NULL) ORDER BY id"
     ).fetchall()
     conn.close()
 
